@@ -1,0 +1,557 @@
+"""Desktop orchestration. Blocking downloads, inference and delivery run off the UI thread."""
+
+from pathlib import Path
+import sys
+import threading
+import time
+
+from PySide6.QtCore import (
+    QLockFile, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot,
+)
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessageBox, QSystemTrayIcon
+
+from talknj.audio import AudioRecorder, MAX_SECONDS, list_input_devices
+from talknj.models import CATALOG, discover_models, download_model, validate_model
+from talknj.native import HotkeyListener, copy_text, foreground_window, type_text, validate_hotkey
+from talknj.settings import data_directory, load_settings, save_settings
+from talknj.transcription import Transcriber
+from talknj.ui import MainWindow, app_icon
+
+
+class JobSignals(QObject):
+    result = Signal(object)
+    failed = Signal(str)
+    done = Signal()
+
+
+class Job(QRunnable):
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+        self.signals = JobSignals()
+
+    def run(self):
+        try:
+            result = self.function()
+        except Exception as exc:
+            self.signals.failed.emit(str(exc) or type(exc).__name__)
+        else:
+            self.signals.result.emit(result)
+        finally:
+            self.signals.done.emit()
+
+
+class Bridge(QObject):
+    pressed = Signal(object)
+    released = Signal()
+    download_progress = Signal(int, int, str)
+
+
+class Controller(QObject):
+    def __init__(self, application: QApplication):
+        super().__init__()
+        self.application = application
+        self.settings, warning = load_settings()
+        self.window = MainWindow()
+        self.recorder = AudioRecorder()
+        self.transcriber = Transcriber()
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(3)
+        self.jobs = set()
+        self.state = "idle"
+        self.models = []
+        self.listener = None
+        self.download_cancel = None
+        self.quitting = False
+        self.target = 0
+        self.started = 0.0
+        self.session = None
+        self.bridge = Bridge(self)
+        self.bridge.pressed.connect(self.hotkey_pressed)
+        self.bridge.released.connect(self.hotkey_released)
+        self.bridge.download_progress.connect(self.update_download)
+        self.indicator = QLabel()
+        self.indicator.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
+                                      Qt.WindowType.WindowStaysOnTopHint |
+                                      Qt.WindowType.WindowDoesNotAcceptFocus |
+                                      Qt.WindowType.WindowTransparentForInput)
+        self.indicator.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.indicator.setStyleSheet("background: #253053; color: white; border-radius: 14px; "
+                                     "padding: 14px 24px; font: 14px 'Segoe UI';")
+        self.indicator.setFixedSize(330, 54)
+        self.timer = QTimer(self)
+        self.timer.setInterval(80)
+        self.timer.timeout.connect(self.tick)
+        self.window.record_requested.connect(self.record_clicked)
+        self.window.copy_requested.connect(self.copy_transcript)
+        self.window.preferences_changed.connect(self.preferences_changed)
+        self.window.hotkey_requested.connect(self.apply_hotkey)
+        self.window.model_changed.connect(self.select_model)
+        self.window.download_requested.connect(self.start_download)
+        self.window.cancel_download_requested.connect(self.cancel_download)
+        self.window.import_requested.connect(self.import_model)
+        self.window.storage_requested.connect(self.choose_storage)
+        self.window.refresh_requested.connect(self.refresh)
+        self.window.hide_requested.connect(self.hide_window)
+        self.tray = QSystemTrayIcon(app_icon(), self)
+        self.tray.setToolTip("TalkNJ · Local dictation")
+        menu = QMenu(self.window)
+        show = menu.addAction("Open TalkNJ")
+        show.triggered.connect(self.show_window)
+        menu.addSeparator()
+        quit_action = menu.addAction("Quit TalkNJ")
+        quit_action.triggered.connect(self.request_quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self.tray_activated)
+        self.tray.show()
+        app_menu = self.window.menuBar().addMenu("App")
+        quit_menu_action = QAction("Quit TalkNJ", self.window)
+        quit_menu_action.setShortcut("Ctrl+Q")
+        quit_menu_action.triggered.connect(self.request_quit)
+        app_menu.addAction(quit_menu_action)
+        self.populate_preferences()
+        self.refresh()
+        self.register_hotkey(self.settings.hotkey)
+        if warning:
+            self.window.show_notice(warning)
+        self.window.show()
+
+    def run_job(self, function, result, failure):
+        job = Job(function)
+        self.jobs.add(job)
+        queued = Qt.ConnectionType.QueuedConnection
+        job.signals.result.connect(result, queued)
+        job.signals.failed.connect(failure, queued)
+        job.signals.done.connect(lambda current=job: self.job_done(current), queued)
+        self.pool.start(job)
+
+    def job_done(self, job):
+        self.jobs.discard(job)
+        if self.quitting and not self.jobs:
+            self.application.quit()
+
+    def persist(self):
+        try:
+            save_settings(self.settings)
+        except OSError as exc:
+            self.window.show_notice(f"Preferences could not be saved: {exc}")
+
+    def populate_preferences(self):
+        for widget, value in ((self.window.language, self.settings.language),
+                              (self.window.output, self.settings.output_mode),
+                              (self.window.hotkey_mode, self.settings.hotkey_mode)):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(max(0, widget.findData(value)))
+            widget.blockSignals(False)
+        self.window.hotkey.setText(self.settings.hotkey)
+        self.update_hints()
+
+    def refresh(self):
+        if self.state != "idle" or self.quitting:
+            return
+        try:
+            self.models = discover_models(Path(self.settings.model_root), self.settings.imported_models)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.models = []
+            self.window.show_notice(f"Could not scan models: {exc}")
+        self.window.show_models(self.models, self.settings.model_path)
+        selected = self.window.model.currentData() or ""
+        self.settings.model_path = selected
+        self.update_model_details()
+        self.window.storage.setText(self.settings.model_root)
+        self.window.microphone.blockSignals(True)
+        self.window.microphone.clear()
+        self.window.microphone.addItem("Windows default microphone", None)
+        try:
+            for device, name in list_input_devices():
+                self.window.microphone.addItem(name, device)
+        except Exception as exc:
+            self.window.show_notice(f"Microphone discovery failed: {exc}")
+        saved_mic = self.settings.microphone
+        matches = [i for i in range(1, self.window.microphone.count())
+                   if self.window.microphone.itemText(i) == saved_mic]
+        index = matches[0] if len(matches) == 1 else -1 if saved_mic else 0
+        self.window.microphone.setCurrentIndex(index)
+        if saved_mic and not matches:
+            self.window.show_notice("Your selected microphone is unavailable. Select an input in Preferences before recording.")
+        elif len(matches) > 1:
+            self.window.show_notice("Multiple microphones have the saved device name. Select an input in Preferences before recording.")
+        self.microphone_missing = bool(saved_mic and len(matches) != 1)
+        self.window.microphone.blockSignals(False)
+        self.update_state("idle")
+
+    def active_model(self):
+        return next((m for m in self.models if str(m.path) == self.settings.model_path), None)
+
+    def update_model_details(self):
+        model = self.active_model()
+        self.window.model_detail.setText(str(model.path) if model else "Download a model or choose an existing CTranslate2 Whisper folder.")
+        vi = self.window.language.model().item(1)
+        vi.setEnabled(bool(model and "vi" in model.languages))
+        if model and self.settings.language not in model.languages:
+            self.settings.language = "en"
+            self.populate_preferences()
+            self.window.show_notice("This model is English-only. Language switched to English; select a multilingual model for Vietnamese.")
+        self.update_hints()
+
+    @Slot(int)
+    def select_model(self, index):
+        if self.state != "idle":
+            return
+        self.settings.model_path = self.window.model.currentData() or ""
+        self.update_model_details()
+        self.persist()
+        self.update_state("idle")
+
+    @Slot()
+    def preferences_changed(self):
+        if self.state != "idle":
+            return
+        self.settings.language = self.window.language.currentData() or "en"
+        self.settings.output_mode = self.window.output.currentData() or "clipboard"
+        self.settings.hotkey_mode = self.window.hotkey_mode.currentData() or "hold"
+        if self.window.microphone.currentIndex() >= 0:
+            self.settings.microphone = (self.window.microphone.currentText()
+                                        if self.window.microphone.currentData() is not None else None)
+            self.microphone_missing = False
+        self.update_hints()
+        self.persist()
+
+    def update_hints(self):
+        gesture = "Hold" if self.settings.hotkey_mode == "hold" else "Press"
+        self.window.capture_hint.setText(
+            f"{gesture} {self.settings.hotkey.upper()} anywhere, or use the recording button. Five-minute limit.")
+        self.window.delivery_hint.setText(
+            "Clipboard only · Nothing is typed automatically" if self.settings.output_mode == "clipboard"
+            else "Active app · Types into the original window and keeps a clipboard copy")
+
+    def register_hotkey(self, chord):
+        try:
+            canonical = validate_hotkey(chord)
+            listener = HotkeyListener(canonical,
+                                      lambda: self.bridge.pressed.emit(foreground_window()),
+                                      self.bridge.released.emit)
+            listener.start()
+        except Exception as exc:
+            self.window.hotkey_status.setText(f"Shortcut unavailable: {exc}")
+            self.window.show_notice(f"Global shortcut could not start: {exc}. The recording button still works.")
+            return False
+        old = self.listener
+        self.listener = listener
+        if old:
+            old.stop()
+        self.settings.hotkey = canonical
+        self.window.hotkey.setText(canonical)
+        self.window.hotkey_status.setText(f"Listening globally for {canonical.upper()}. Other apps may also respond to this chord.")
+        self.update_hints()
+        return True
+
+    @Slot()
+    def apply_hotkey(self):
+        if self.state != "idle":
+            return
+        if self.register_hotkey(self.window.hotkey.text().strip().lower()):
+            self.window.show_notice("")
+            self.persist()
+
+    @Slot(object)
+    def hotkey_pressed(self, target):
+        if self.quitting:
+            return
+        if self.state == "idle":
+            self.start_recording(target)
+        elif self.state == "recording" and self.settings.hotkey_mode == "toggle":
+            self.stop_recording()
+
+    @Slot()
+    def hotkey_released(self):
+        if self.state == "recording" and self.settings.hotkey_mode == "hold":
+            self.stop_recording()
+
+    @Slot()
+    def record_clicked(self):
+        if self.state == "recording":
+            self.stop_recording()
+        elif self.state == "idle":
+            # Clicking the app itself is a preview workflow, not a request to type elsewhere.
+            self.start_recording(0)
+
+    def update_state(self, state):
+        self.state = state
+        self.window.set_busy(state, self.active_model() is not None)
+        self.tray.setToolTip(f"TalkNJ · {state.capitalize()} · {self.settings.hotkey.upper()}")
+        if state == "idle":
+            self.indicator.hide()
+        elif not self.window.isActiveWindow():
+            screen = self.application.primaryScreen().availableGeometry()
+            self.indicator.move(screen.center().x() - 165, screen.bottom() - 90)
+            self.indicator.setText("Listening…" if state == "recording" else f"{state.capitalize()} locally…")
+            self.indicator.show()
+
+    def start_recording(self, target):
+        model = self.active_model()
+        if not model:
+            self.window.show_notice("Download or select a model in Model library before recording.")
+            self.tray.showMessage("TalkNJ needs a model", "Open Model library and download a local Whisper model.")
+            return
+        if self.microphone_missing:
+            self.window.show_notice("Select an available microphone in Preferences before recording.")
+            return
+        self.window.show_notice("")
+        try:
+            self.recorder.start(self.window.microphone.currentData())
+        except Exception as exc:
+            self.window.show_notice(f"Could not start microphone: {exc}")
+            self.tray.showMessage("Microphone unavailable", str(exc))
+            return
+        self.target = target
+        self.session = (Path(model.path), self.settings.language, self.settings.output_mode, target)
+        self.started = time.monotonic()
+        self.window.elapsed.setText("00:00 / 05:00")
+        self.update_state("recording")
+        self.timer.start()
+
+    @Slot()
+    def tick(self):
+        if self.state != "recording":
+            return
+        seconds = min(int(time.monotonic() - self.started), MAX_SECONDS)
+        self.window.elapsed.setText(f"{seconds // 60:02d}:{seconds % 60:02d} / 05:00")
+        self.window.level.setValue(int(self.recorder.level * 100))
+        self.indicator.setText(f"Listening · {seconds // 60:02d}:{seconds % 60:02d}")
+        if self.recorder.error or self.recorder.limit_reached:
+            self.stop_recording()
+
+    def stop_recording(self):
+        self.timer.stop()
+        try:
+            audio = self.recorder.stop()
+        except Exception as exc:
+            self.operation_failed(f"Recording failed: {exc}")
+            return
+        model, language, mode, target = self.session
+        self.update_state("transcribing")
+        self.run_job(lambda: self.transcriber.transcribe(audio, model, language),
+                     lambda text: self.transcribed(text, mode, target), self.operation_failed)
+
+    def transcribed(self, text, mode, target):
+        if self.quitting:
+            return
+        if not text.strip():
+            self.window.result.setText("No speech detected. Nothing was copied or typed.")
+            self.update_state("idle")
+            return
+        self.window.transcript.setPlainText(text)
+        self.update_state("delivering")
+
+        def deliver():
+            copy_text(text)
+            if mode == "type" and target:
+                try:
+                    type_text(target, text)
+                except Exception as exc:
+                    return f"Text copied, but not fully typed: {exc} Recover the complete text from the clipboard."
+                return "Typed into the original application. A copy is also on the clipboard."
+            if mode == "type":
+                return "Preview recording: copied to clipboard. Use the global shortcut from another app for automatic typing."
+            return "Copied to clipboard. Nothing was typed into another application."
+
+        self.run_job(deliver, self.delivered, self.operation_failed)
+
+    def delivered(self, message):
+        self.window.result.setText(message)
+        if "not fully typed" in message:
+            self.window.show_notice(message)
+            self.tray.showMessage("Transcript kept in clipboard", message)
+        self.update_state("idle")
+
+    def operation_failed(self, message):
+        self.window.show_notice(message)
+        self.window.result.setText("Your latest transcript is still available. Recording audio is not saved.")
+        self.update_state("idle")
+        if not self.window.isVisible():
+            self.tray.showMessage("TalkNJ", message)
+
+    @Slot()
+    def copy_transcript(self):
+        text = self.window.transcript.toPlainText()
+        if not text:
+            return
+        try:
+            copy_text(text)
+            self.window.result.setText("Edited transcript copied to clipboard.")
+        except Exception as exc:
+            self.window.show_notice(f"Could not copy transcript: {exc}")
+
+    @Slot(str)
+    def start_download(self, model_id):
+        if self.download_cancel is not None or self.quitting:
+            return
+        spec = next(s for s in CATALOG if s.id == model_id)
+        root = Path(self.settings.model_root)
+        cancel = threading.Event()
+        self.download_cancel = cancel
+        self.window.set_download_busy(True)
+        self.window.download_status.setText(f"Starting {spec.name} download…")
+        self.window.download_progress.setRange(0, 0)
+        self.run_job(lambda: download_model(spec, root, self.bridge.download_progress.emit, cancel),
+                     self.download_finished, self.download_failed)
+
+    @Slot(int, int, str)
+    def update_download(self, done, total, filename):
+        if total:
+            self.window.download_progress.setRange(0, 100)
+            self.window.download_progress.setValue(min(100, int(done * 100 / total)))
+        else:
+            self.window.download_progress.setRange(0, 0)
+        self.window.download_status.setText(f"{filename} · {done / 1_000_000:.1f} MB" +
+                                            (f" / {total / 1_000_000:.1f} MB" if total else ""))
+
+    def end_download(self):
+        self.download_cancel = None
+        self.window.set_download_busy(False)
+
+    def download_finished(self, path):
+        self.end_download()
+        self.window.download_status.setText(f"Ready offline: {Path(path).name}")
+        if self.state == "idle":
+            self.settings.model_path = str(Path(path).resolve())
+            self.refresh()
+            self.persist()
+        else:
+            self.window.download_status.setText("Download complete. Click Refresh when dictation finishes to select it.")
+
+    def download_failed(self, message):
+        self.end_download()
+        self.window.download_status.setText(message)
+        if not self.quitting:
+            self.window.show_notice(f"Model download: {message}")
+
+    @Slot()
+    def cancel_download(self):
+        if self.download_cancel is not None:
+            self.download_cancel.set()
+            self.window.cancel_download.setEnabled(False)
+            self.window.download_status.setText("Cancelling download…")
+
+    @Slot()
+    def choose_storage(self):
+        if self.download_cancel is not None or self.state != "idle" or self.quitting:
+            return
+        path = QFileDialog.getExistingDirectory(self.window, "Choose model download folder", self.settings.model_root)
+        if path:
+            # Keep references to installed models when moving the download destination.
+            self.settings.imported_models = list(dict.fromkeys(
+                self.settings.imported_models + [str(m.path) for m in self.models]))
+            self.settings.model_root = path
+            self.refresh()
+            self.persist()
+
+    @Slot()
+    def import_model(self):
+        if self.state != "idle" or self.quitting:
+            return
+        path = QFileDialog.getExistingDirectory(self.window, "Select a CTranslate2 Whisper model folder")
+        if not path:
+            return
+        try:
+            model = validate_model(Path(path))
+        except Exception as exc:
+            self.window.show_notice(f"Cannot use this model: {exc}")
+            return
+        self.settings.imported_models = list(dict.fromkeys(self.settings.imported_models + [str(model.path)]))
+        self.settings.model_path = str(model.path)
+        self.refresh()
+        self.persist()
+
+    @Slot()
+    def show_window(self):
+        self.window.showNormal()
+        self.window.raise_()
+        self.window.activateWindow()
+
+    def tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.DoubleClick, QSystemTrayIcon.ActivationReason.Trigger):
+            self.show_window()
+
+    @Slot()
+    def hide_window(self):
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.window.hide()
+        else:
+            self.window.showMinimized()
+
+    @Slot()
+    def request_quit(self):
+        if self.quitting:
+            return
+        if self.state == "recording":
+            answer = QMessageBox.question(self.window, "Discard current recording?",
+                                          "Quitting discards the current recording without transcribing it.")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.quitting = True
+        self.timer.stop()
+        cleanup_errors = []
+        try:
+            self.recorder.cancel()
+        except RuntimeError as exc:
+            cleanup_errors.append(str(exc))
+        if self.listener:
+            try:
+                self.listener.stop()
+            except RuntimeError as exc:
+                cleanup_errors.append(str(exc))
+        if cleanup_errors:
+            QMessageBox.warning(self.window, "Shutdown warning", "\n".join(cleanup_errors))
+        self.cancel_download()
+        self.indicator.hide()
+        self.tray.hide()
+        if self.jobs:
+            # Keep the event loop alive until in-flight native inference releases resources.
+            self.window.show_notice("Finishing the current local operation before quitting…")
+            self.window.setEnabled(False)
+            self.window.show()
+        else:
+            self.window.allow_close = True
+            self.window.close()
+            self.application.quit()
+
+
+def main() -> int:
+    if sys.platform != "win32":
+        print("TalkNJ requires Windows 10/11 x64.", file=sys.stderr)
+        return 1
+    application = QApplication(sys.argv)
+    application.setApplicationName("TalkNJ")
+    application.setOrganizationName("TalkNJ")
+    application.setWindowIcon(app_icon())
+    application.setQuitOnLastWindowClosed(False)
+    data_directory().mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(data_directory() / "instance.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None, "TalkNJ is already running", "Open TalkNJ using its system-tray icon.")
+        return 0
+    controller = Controller(application)
+
+    def report_exception(kind, value, traceback):
+        sys.__excepthook__(kind, value, traceback)
+        controller.window.show_notice(f"Unexpected error: {value}")
+
+    sys.excepthook = report_exception
+    try:
+        return application.exec()
+    finally:
+        controller.timer.stop()
+        try:
+            controller.recorder.cancel()
+        finally:
+            try:
+                if controller.listener:
+                    controller.listener.stop()
+            finally:
+                controller.pool.waitForDone()
+                lock.unlock()
