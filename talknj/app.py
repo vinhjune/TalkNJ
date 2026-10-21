@@ -13,7 +13,9 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessage
 
 from talknj.audio import AudioRecorder, MAX_SECONDS, list_input_devices
 from talknj.models import CATALOG, discover_models, download_model, validate_model
-from talknj.native import HotkeyListener, copy_text, foreground_window, type_text, validate_hotkey
+from talknj.native import (
+    HotkeyListener, copy_text, foreground_window, format_hotkey, type_text, validate_hotkey,
+)
 from talknj.settings import data_directory, load_settings, save_settings
 from talknj.transcription import Transcriber
 from talknj.ui import MainWindow, app_icon
@@ -44,7 +46,7 @@ class Job(QRunnable):
 
 class Bridge(QObject):
     pressed = Signal(object)
-    released = Signal()
+    released = Signal(object)
     download_progress = Signal(int, int, str)
 
 
@@ -61,7 +63,11 @@ class Controller(QObject):
         self.jobs = set()
         self.state = "idle"
         self.models = []
+        self._scan_epoch = 0
         self.listener = None
+        self._hotkey_epoch = 0
+        self._choosing_hotkey = False
+        self._hotkey_holding = False
         self.download_cancel = None
         self.quitting = False
         self.target = 0
@@ -88,6 +94,7 @@ class Controller(QObject):
         self.window.copy_requested.connect(self.copy_transcript)
         self.window.preferences_changed.connect(self.preferences_changed)
         self.window.hotkey_requested.connect(self.apply_hotkey)
+        self.window.choose_hotkey_requested.connect(self.choose_hotkey)
         self.window.model_changed.connect(self.select_model)
         self.window.download_requested.connect(self.start_download)
         self.window.cancel_download_requested.connect(self.cancel_download)
@@ -107,10 +114,10 @@ class Controller(QObject):
         self.tray.activated.connect(self.tray_activated)
         self.tray.show()
         app_menu = self.window.menuBar().addMenu("App")
-        quit_menu_action = QAction("Quit TalkNJ", self.window)
-        quit_menu_action.setShortcut("Ctrl+Q")
-        quit_menu_action.triggered.connect(self.request_quit)
-        app_menu.addAction(quit_menu_action)
+        self.quit_action = QAction("Quit TalkNJ", self.window)
+        self.quit_action.setShortcut("Ctrl+Q")
+        self.quit_action.triggered.connect(self.request_quit)
+        app_menu.addAction(self.quit_action)
         self.populate_preferences()
         self.refresh()
         self.register_hotkey(self.settings.hotkey)
@@ -130,7 +137,16 @@ class Controller(QObject):
     def job_done(self, job):
         self.jobs.discard(job)
         if self.quitting and not self.jobs:
+            self.close_transcriber()
             self.application.quit()
+
+    def close_transcriber(self):
+        try:
+            self.transcriber.close()
+        except Exception as exc:
+            message = f"Could not close the local speech engine: {exc}"
+            self.window.show_notice(message)
+            QMessageBox.warning(self.window, "Shutdown warning", message)
 
     def persist(self):
         try:
@@ -145,22 +161,41 @@ class Controller(QObject):
             widget.blockSignals(True)
             widget.setCurrentIndex(max(0, widget.findData(value)))
             widget.blockSignals(False)
-        self.window.hotkey.setText(self.settings.hotkey)
+        try:
+            self.window.set_hotkey(self.settings.hotkey)
+        except (TypeError, ValueError):
+            self.window.set_hotkey("")
         self.update_hints()
 
     def refresh(self):
-        if self.state != "idle" or self.quitting:
+        if self.quitting:
             return
-        try:
-            self.models = discover_models(Path(self.settings.model_root), self.settings.imported_models)
-        except (OSError, ValueError, RuntimeError) as exc:
-            self.models = []
-            self.window.show_notice(f"Could not scan models: {exc}")
+        if self.state == "idle":
+            self.refresh_microphones()
+        self.update_state(self.state)
+        self._scan_epoch += 1
+        epoch = self._scan_epoch
+        root = Path(self.settings.model_root)
+        imported = tuple(self.settings.imported_models)
+        self.window.model_detail.setText("Checking local models…")
+        self.run_job(lambda: discover_models(root, imported),
+                     lambda models: self.models_scanned(epoch, models),
+                     lambda error: self.models_scanned(epoch, [], error))
+
+    def models_scanned(self, epoch, models, error=""):
+        if self.quitting or epoch != self._scan_epoch:
+            return
+        self.models = models
+        if error:
+            self.window.show_notice(f"Could not scan models: {error}")
         self.window.show_models(self.models, self.settings.model_path)
         selected = self.window.model.currentData() or ""
         self.settings.model_path = selected
         self.update_model_details()
         self.window.storage.setText(self.settings.model_root)
+        self.update_state(self.state)
+
+    def refresh_microphones(self):
         self.window.microphone.blockSignals(True)
         self.window.microphone.clear()
         self.window.microphone.addItem("Windows default microphone", None)
@@ -180,20 +215,19 @@ class Controller(QObject):
             self.window.show_notice("Multiple microphones have the saved device name. Select an input in Preferences before recording.")
         self.microphone_missing = bool(saved_mic and len(matches) != 1)
         self.window.microphone.blockSignals(False)
-        self.update_state("idle")
 
     def active_model(self):
         return next((m for m in self.models if str(m.path) == self.settings.model_path), None)
 
     def update_model_details(self):
         model = self.active_model()
-        self.window.model_detail.setText(str(model.path) if model else "Download a model or choose an existing CTranslate2 Whisper folder.")
+        self.window.model_detail.setText(str(model.path) if model else "Download a speech model or choose a supported local model folder.")
         vi = self.window.language.model().item(1)
         vi.setEnabled(bool(model and "vi" in model.languages))
         if model and self.settings.language not in model.languages:
             self.settings.language = "en"
             self.populate_preferences()
-            self.window.show_notice("This model is English-only. Language switched to English; select a multilingual model for Vietnamese.")
+            self.window.show_notice("This model does not support the selected language. Language switched to English; choose a Vietnamese-capable model for Vietnamese.")
         self.update_hints()
 
     @Slot(int)
@@ -221,54 +255,117 @@ class Controller(QObject):
 
     def update_hints(self):
         gesture = "Hold" if self.settings.hotkey_mode == "hold" else "Press"
+        try:
+            shortcut = format_hotkey(self.settings.hotkey)
+        except (TypeError, ValueError):
+            shortcut = "a configured shortcut"
         self.window.capture_hint.setText(
-            f"{gesture} {self.settings.hotkey.upper()} anywhere, or use the recording button. Five-minute limit.")
+            f"{gesture} {shortcut} anywhere, or use the recording button. Five-minute limit.")
         self.window.delivery_hint.setText(
             "Clipboard only · Nothing is typed automatically" if self.settings.output_mode == "clipboard"
             else "Active app · Types into the original window and keeps a clipboard copy")
 
     def register_hotkey(self, chord):
+        listener = None
         try:
             canonical = validate_hotkey(chord)
-            listener = HotkeyListener(canonical,
-                                      lambda: self.bridge.pressed.emit(foreground_window()),
-                                      self.bridge.released.emit)
+            listener = HotkeyListener(
+                canonical,
+                lambda: self.bridge.pressed.emit((listener, self._hotkey_epoch, foreground_window())),
+                lambda: self.bridge.released.emit((listener, self._hotkey_epoch)),
+            )
+            # A candidate never fires while Windows is checking/installing it.
+            listener.suspend()
             listener.start()
         except Exception as exc:
-            self.window.hotkey_status.setText(f"Shortcut unavailable: {exc}")
-            self.window.show_notice(f"Global shortcut could not start: {exc}. The recording button still works.")
+            cleanup_warning = ""
+            if listener is not None:
+                try:
+                    listener.stop()
+                except RuntimeError as cleanup_error:
+                    cleanup_warning = f" Candidate cleanup reported: {cleanup_error}"
+            retained = (f" {format_hotkey(self.listener.chord)} is still active."
+                        if self.listener else " The recording button still works.")
+            self.window.hotkey_status.setText(f"Shortcut unavailable: {exc}.{retained}{cleanup_warning}")
+            self.window.show_notice(f"Global shortcut could not start: {exc}.{retained}{cleanup_warning}")
             return False
         old = self.listener
-        self.listener = listener
         if old:
-            old.stop()
+            old.suspend()
+        self._hotkey_epoch += 1
+        self._hotkey_holding = False
+        self.listener = listener
+        cleanup_warning = ""
+        if old:
+            try:
+                old.stop()
+            except RuntimeError as exc:
+                cleanup_warning = f" Previous listener cleanup reported: {exc}"
+        listener.resume()
         self.settings.hotkey = canonical
-        self.window.hotkey.setText(canonical)
-        self.window.hotkey_status.setText(f"Listening globally for {canonical.upper()}. Other apps may also respond to this chord.")
+        self.quit_action.setShortcut("" if canonical == "ctrl+q" else "Ctrl+Q")
+        self.window.set_hotkey(canonical)
+        self.window.hotkey_status.setText(
+            f"Listening globally for {format_hotkey(canonical)}. Other apps may also respond to this chord."
+            + cleanup_warning)
         self.update_hints()
         return True
 
     @Slot()
-    def apply_hotkey(self):
-        if self.state != "idle":
+    def choose_hotkey(self):
+        if self.state != "idle" or self.quitting or self._choosing_hotkey:
             return
-        if self.register_hotkey(self.window.hotkey.text().strip().lower()):
+        self._choosing_hotkey = True
+        self._hotkey_epoch += 1
+        self._hotkey_holding = False
+        listener = self.listener
+        if listener:
+            listener.suspend()
+        try:
+            chord = self.window.capture_hotkey()
+            if chord:
+                self.window.set_hotkey(chord, pending=True)
+                self.window.hotkey_status.setText(
+                    f"Selected {format_hotkey(chord)}. Apply to activate and save; "
+                    "your previous shortcut remains unchanged until then.")
+        except Exception as exc:
+            self.window.show_notice(f"Could not choose a shortcut: {exc}")
+        finally:
+            self._hotkey_epoch += 1
+            if listener and not self.quitting:
+                listener.resume()
+            self._choosing_hotkey = False
+
+    @Slot()
+    def apply_hotkey(self):
+        if self.state != "idle" or self.quitting or self._choosing_hotkey:
+            return
+        if self.register_hotkey(self.window.hotkey_chord):
             self.window.show_notice("")
             self.persist()
 
     @Slot(object)
-    def hotkey_pressed(self, target):
-        if self.quitting:
+    def hotkey_pressed(self, event):
+        source, epoch, target = event
+        if (self.quitting or self._choosing_hotkey or source is not self.listener
+                or epoch != self._hotkey_epoch):
             return
         if self.state == "idle":
             self.start_recording(target)
+            self._hotkey_holding = self.state == "recording" and self.settings.hotkey_mode == "hold"
         elif self.state == "recording" and self.settings.hotkey_mode == "toggle":
             self.stop_recording()
 
-    @Slot()
-    def hotkey_released(self):
-        if self.state == "recording" and self.settings.hotkey_mode == "hold":
-            self.stop_recording()
+    @Slot(object)
+    def hotkey_released(self, event):
+        source, epoch = event
+        if (self.quitting or self._choosing_hotkey or source is not self.listener
+                or epoch != self._hotkey_epoch):
+            return
+        if self._hotkey_holding:
+            self._hotkey_holding = False
+            if self.state == "recording" and self.settings.hotkey_mode == "hold":
+                self.stop_recording()
 
     @Slot()
     def record_clicked(self):
@@ -281,7 +378,7 @@ class Controller(QObject):
     def update_state(self, state):
         self.state = state
         self.window.set_busy(state, self.active_model() is not None)
-        self.tray.setToolTip(f"TalkNJ · {state.capitalize()} · {self.settings.hotkey.upper()}")
+        self.tray.setToolTip(f"TalkNJ · {state.capitalize()} · {self.window.hotkey.text()}")
         if state == "idle":
             self.indicator.hide()
         elif not self.window.isActiveWindow():
@@ -294,7 +391,7 @@ class Controller(QObject):
         model = self.active_model()
         if not model:
             self.window.show_notice("Download or select a model in Model library before recording.")
-            self.tray.showMessage("TalkNJ needs a model", "Open Model library and download a local Whisper model.")
+            self.tray.showMessage("TalkNJ needs a model", "Open Model library and download a local speech model.")
             return
         if self.microphone_missing:
             self.window.show_notice("Select an available microphone in Preferences before recording.")
@@ -325,6 +422,7 @@ class Controller(QObject):
             self.stop_recording()
 
     def stop_recording(self):
+        self._hotkey_holding = False
         self.timer.stop()
         try:
             audio = self.recorder.stop()
@@ -453,13 +551,14 @@ class Controller(QObject):
     def import_model(self):
         if self.state != "idle" or self.quitting:
             return
-        path = QFileDialog.getExistingDirectory(self.window, "Select a CTranslate2 Whisper model folder")
+        path = QFileDialog.getExistingDirectory(self.window, "Select a supported speech model folder")
         if not path:
             return
-        try:
-            model = validate_model(Path(path))
-        except Exception as exc:
-            self.window.show_notice(f"Cannot use this model: {exc}")
+        self.run_job(lambda: validate_model(Path(path)), self.model_imported,
+                     lambda error: self.window.show_notice(f"Cannot use this model: {error}"))
+
+    def model_imported(self, model):
+        if self.quitting:
             return
         self.settings.imported_models = list(dict.fromkeys(self.settings.imported_models + [str(model.path)]))
         self.settings.model_path = str(model.path)
@@ -515,6 +614,7 @@ class Controller(QObject):
             self.window.setEnabled(False)
             self.window.show()
         else:
+            self.close_transcriber()
             self.window.allow_close = True
             self.window.close()
             self.application.quit()
@@ -553,5 +653,8 @@ def main() -> int:
                 if controller.listener:
                     controller.listener.stop()
             finally:
-                controller.pool.waitForDone()
-                lock.unlock()
+                try:
+                    controller.pool.waitForDone()
+                    controller.close_transcriber()
+                finally:
+                    lock.unlock()

@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from talknj import models
+from talknj import _model_formats
 from talknj import transcription
 
 
@@ -92,11 +93,12 @@ def _network(
     wrong_checksum: bool = False,
     unknown_sizes: bool = False,
     truncated_file: str | None = None,
+    checksum_file: str = "model.bin",
 ) -> list[str]:
     calls: list[str] = []
     siblings = [
         {"rfilename": name, "size": 0 if unknown_sizes else len(content),
-         "lfs": {"sha256": "0" * 64 if wrong_checksum and name == "model.bin"
+         "lfs": {"sha256": "0" * 64 if wrong_checksum and name == checksum_file
                  else hashlib.sha256(content).hexdigest()}}
         for name, content in files.items()
     ]
@@ -125,6 +127,10 @@ def test_catalog_is_immutable_and_exposes_required_languages() -> None:
     assert {"tiny.en", "base.en", "small.en", "base", "small"}.issubset(by_id)
     assert by_id["tiny.en"].languages == ("en",)
     assert by_id["base"].languages == ("en", "vi")
+    assert by_id["parakeet-tdt-0.6b-v2-int8"].languages == ("en",)
+    assert by_id["parakeet-tdt-0.6b-v2-int8"].backend == "sherpa-onnx"
+    assert by_id["whisper.cpp-base"].languages == ("en", "vi")
+    assert by_id["whisper.cpp-base"].backend == "whisper.cpp"
     with pytest.raises(FrozenInstanceError):
         by_id["base"].name = "changed"
 
@@ -340,7 +346,7 @@ def test_transcriber_caches_one_model_and_preserves_whisper_punctuation(
             assert samples.dtype == np.float32 and samples.ndim == 1
             return iter([SimpleNamespace(text=" Hello, world! "), SimpleNamespace(text=" It works.")]), None
 
-    monkeypatch.setattr(transcription, "WhisperModel", FakeWhisper)
+    monkeypatch.setattr("faster_whisper.WhisperModel", FakeWhisper)
     transcriber = transcription.Transcriber()
     samples = np.ones(1600, dtype=np.float64) * 0.1
     assert transcriber.transcribe(samples, path, "en") == "Hello, world! It works."
@@ -368,7 +374,7 @@ def test_silence_does_not_load_model_or_hallucinate(
     def unexpected_load(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Silent input must not load Whisper")
 
-    monkeypatch.setattr(transcription, "WhisperModel", unexpected_load)
+    monkeypatch.setattr("faster_whisper.WhisperModel", unexpected_load)
     assert transcription.Transcriber().transcribe(samples, path, "en") == ""
 
 
@@ -396,7 +402,7 @@ def test_lazy_inference_failure_is_reported(tmp_path: Path, monkeypatch: pytest.
                 raise RuntimeError("decoder failed")
             return segments(), None
 
-    monkeypatch.setattr(transcription, "WhisperModel", FailingWhisper)
+    monkeypatch.setattr("faster_whisper.WhisperModel", FailingWhisper)
     with pytest.raises(RuntimeError, match="Offline transcription failed.*decoder failed"):
         transcription.Transcriber().transcribe(np.ones(100, dtype=np.float32), path, "en")
 
@@ -417,7 +423,7 @@ def test_model_switch_replaces_cached_model_and_supports_vietnamese(
             text = "Xin chào, thế giới!" if kwargs["language"] == "vi" else "Hello!"
             return iter([SimpleNamespace(text=text)]), None
 
-    monkeypatch.setattr(transcription, "WhisperModel", FakeWhisper)
+    monkeypatch.setattr("faster_whisper.WhisperModel", FakeWhisper)
     transcriber = transcription.Transcriber()
     samples = np.ones(100, dtype=np.float32) * 0.1
     assert transcriber.transcribe(samples, english, "en") == "Hello!"
@@ -435,7 +441,7 @@ def test_missing_tokenizer_is_rejected_before_whisper_can_download_it(
     def unexpected_load(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Missing local tokenizer must be rejected before Whisper construction")
 
-    monkeypatch.setattr(transcription, "WhisperModel", unexpected_load)
+    monkeypatch.setattr("faster_whisper.WhisperModel", unexpected_load)
     with pytest.raises(models.ModelError, match="tokenizer.json"):
         transcription.Transcriber().transcribe(np.ones(100, dtype=np.float32), path, "en")
 
@@ -446,7 +452,7 @@ def test_model_load_failure_is_actionable(tmp_path: Path, monkeypatch: pytest.Mo
     def fail(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("not enough memory")
 
-    monkeypatch.setattr(transcription, "WhisperModel", fail)
+    monkeypatch.setattr("faster_whisper.WhisperModel", fail)
     with pytest.raises(RuntimeError, match="Cannot load the local model.*not enough memory"):
         transcription.Transcriber().transcribe(np.ones(100, dtype=np.float32), path, "en")
 
@@ -459,7 +465,7 @@ def test_file_decode_failure_is_actionable(tmp_path: Path, monkeypatch: pytest.M
     def fail(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("unrecognized media")
 
-    monkeypatch.setattr(transcription, "decode_audio", fail)
+    monkeypatch.setattr("faster_whisper.audio.decode_audio", fail)
     with pytest.raises(RuntimeError, match="Cannot decode the local audio file.*unrecognized media"):
         transcription.Transcriber().transcribe(invalid_audio, path, "en")
 
@@ -522,3 +528,203 @@ def test_equal_size_language_token_mismatch_is_still_rejected(tmp_path: Path) ->
     (path / "vocabulary.json").write_text(json.dumps(vocabulary), encoding="utf-8")
     with pytest.raises(models.ModelError, match="disagree.*vi"):
         models.validate_model(path)
+
+
+@pytest.fixture
+def native_payloads(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, bytes]]:
+    # Transaction/validation fixtures are tiny stand-ins, not inference models.
+    # Only their expected digests are replaced; the real streaming validator and
+    # downloader run unchanged. Integration owns published weights and execution.
+    parakeet = {name: (name + " official test payload").encode()
+                for name in _model_formats.PARAKEET_FILES}
+    digests = {}
+    for name, content in parakeet.items():
+        digests[name] = (hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
+                         if name == "tokens.txt" else hashlib.sha256(content).hexdigest())
+    monkeypatch.setattr(_model_formats, "_PARAKEET_DIGESTS", digests)
+    ggml = {"ggml-base.bin": b"standard multilingual Base test payload"}
+    monkeypatch.setattr(_model_formats, "_GGML_DIGEST",
+                        hashlib.sha256(ggml["ggml-base.bin"]).hexdigest())
+    return {"sherpa-onnx": parakeet, "whisper.cpp": ggml}
+
+
+def _write_native_model(path: Path, files: dict[str, bytes]) -> Path:
+    path.mkdir(parents=True)
+    for name, content in files.items():
+        (path / name).write_bytes(content)
+    return path
+
+
+@pytest.mark.parametrize("backend", ["sherpa-onnx", "whisper.cpp"])
+def test_native_models_download_discover_import_and_reuse_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    native_payloads: dict[str, dict[str, bytes]], backend: str,
+) -> None:
+    files = native_payloads[backend]
+    calls = _network(monkeypatch, files)
+    spec = next(spec for spec in models.CATALOG if spec.backend == backend)
+    root = tmp_path / "models"
+    progress: list[tuple[int, int, str]] = []
+
+    def report(done: int, total: int, name: str) -> None:
+        progress.append((done, total, name))
+        assert models.discover_models(root, []) == []
+
+    path = models.download_model(spec, root, report, Event())
+    installed = models.validate_model(path)
+    assert installed.backend == backend
+    assert installed.languages == spec.languages
+    assert installed.model_file == ("ggml-base.bin" if backend == "whisper.cpp" else None)
+    assert progress[-1][:2] == (sum(map(len, files.values())),) * 2
+    assert [row[0] for row in progress] == sorted(row[0] for row in progress)
+    assert len(calls) == len(files) + 1
+    assert all("/resolve/" + "a" * 40 + "/" in url for url in calls[1:])
+    assert {url.rsplit("/", 1)[-1] for url in calls[1:]} == set(files)
+    calls.clear()
+    imported = _write_native_model(tmp_path / "renamed-import", files)
+    assert [item.path for item in models.discover_models(root, [str(imported)])] == [path, imported]
+    assert models.download_model(spec, root, lambda *_: None, Event()) == path
+    assert calls == []
+
+
+@pytest.mark.parametrize("backend", ["sherpa-onnx", "whisper.cpp"])
+@pytest.mark.parametrize("failure", ["network", "truncated", "checksum", "cancel"])
+def test_native_download_failures_leave_no_install_or_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    native_payloads: dict[str, dict[str, bytes]], backend: str, failure: str,
+) -> None:
+    files = native_payloads[backend]
+    first = next(iter(files))
+    _network(monkeypatch, files, fail_file=first if failure == "network" else None,
+             truncated_file=first if failure == "truncated" else None,
+             wrong_checksum=failure == "checksum", checksum_file=first)
+    spec = next(spec for spec in models.CATALOG if spec.backend == backend)
+    cancel = Event()
+
+    def report(done: int, _total: int, _name: str) -> None:
+        if failure == "cancel" and done:
+            cancel.set()
+
+    with pytest.raises(models.ModelError):
+        models.download_model(spec, tmp_path, report, cancel)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("backend", ["sherpa-onnx", "whisper.cpp"])
+def test_native_import_checks_all_payloads_and_rechecks_modified_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    native_payloads: dict[str, dict[str, bytes]], backend: str,
+) -> None:
+    files = native_payloads[backend]
+    path = _write_native_model(tmp_path / "model", files)
+    original_open = Path.open
+    reads: list[str] = []
+
+    def track_open(file: Path, *args, **kwargs):
+        reads.append(file.name)
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", track_open)
+    assert models.validate_model(path).backend == backend
+    assert sorted(reads) == sorted(files)
+    reads.clear()
+    assert models.validate_model(path).backend == backend
+    assert reads == []
+    first = path / next(iter(files))
+    first.write_bytes(b"truncated")
+    with pytest.raises(models.ModelError, match="incomplete, corrupt, or incompatible"):
+        models.validate_model(path)
+    assert models.discover_models(tmp_path, []) == []
+
+
+@pytest.mark.parametrize("missing", list(_model_formats.PARAKEET_FILES))
+def test_parakeet_incomplete_layout_is_not_offered(
+    tmp_path: Path, native_payloads: dict[str, dict[str, bytes]], missing: str,
+) -> None:
+    path = _write_native_model(tmp_path / "model", native_payloads["sherpa-onnx"])
+    (path / missing).unlink()
+    with pytest.raises(models.ModelError, match="missing"):
+        models.validate_model(path)
+    assert models.discover_models(tmp_path, []) == []
+
+
+@pytest.mark.parametrize("backend", ["sherpa-onnx", "whisper.cpp"])
+def test_wrong_native_export_reports_exact_supported_import_contract(
+    tmp_path: Path, backend: str,
+) -> None:
+    files = ({name: b"wrong export" for name in _model_formats.PARAKEET_FILES}
+             if backend == "sherpa-onnx" else {"ggml-base.bin": b"gguf or English-only or truncated"})
+    path = _write_native_model(tmp_path / "model", files)
+    with pytest.raises(models.ModelError, match=("csukuangfj/" if backend == "sherpa-onnx"
+                                               else "ggerganov/whisper.cpp")):
+        models.validate_model(path)
+
+
+def test_multiple_model_formats_cannot_silently_choose_a_backend(
+    tmp_path: Path, native_payloads: dict[str, dict[str, bytes]],
+) -> None:
+    path = _write_model(tmp_path / "mixed")
+    (path / "ggml-base.bin").write_bytes(native_payloads["whisper.cpp"]["ggml-base.bin"])
+    with pytest.raises(models.ModelError, match="mixes multiple model formats"):
+        models.validate_model(path)
+
+
+def test_import_cannot_follow_native_weight_symlink_outside_model_folder(
+    tmp_path: Path, native_payloads: dict[str, dict[str, bytes]],
+) -> None:
+    payload = native_payloads["whisper.cpp"]["ggml-base.bin"]
+    external = tmp_path / "outside.bin"
+    external.write_bytes(payload)
+    path = tmp_path / "model"
+    path.mkdir()
+    try:
+        (path / "ggml-base.bin").symlink_to(external)
+    except OSError:
+        pytest.skip("Creating symbolic links requires Windows Developer Mode or administrator rights")
+    with pytest.raises(models.ModelError, match="symbolic links"):
+        models.validate_model(path)
+
+
+def test_missing_native_manifest_checksum_never_starts_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = json.dumps({"sha": "a" * 40,
+                           "siblings": [{"rfilename": "ggml-base.bin", "size": 100}]}).encode()
+    monkeypatch.setattr(models, "urlopen", lambda *_args, **_kwargs: io.BytesIO(metadata))
+    spec = next(spec for spec in models.CATALOG if spec.backend == "whisper.cpp")
+    with pytest.raises(models.ModelError, match="required SHA256"):
+        models.download_model(spec, tmp_path, lambda *_: None, Event())
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_loaded_ct2_weights_cannot_silently_override_vietnamese_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_model(tmp_path / "multilingual", multilingual=True)
+
+    class EnglishWeights:
+        supported_languages = ["en"]
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def transcribe(self, *_args: object, **_kwargs: object) -> None:
+            pytest.fail("Weights/metadata disagreement must be rejected before decoding")
+
+    monkeypatch.setattr("faster_whisper.WhisperModel", EnglishWeights)
+    with pytest.raises(RuntimeError, match="weights disagree"):
+        transcription.Transcriber().transcribe(np.ones(100, dtype=np.float32), path, "vi")
+
+
+def test_renamed_ggml_payload_is_reused_with_real_byte_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    native_payloads: dict[str, dict[str, bytes]],
+) -> None:
+    spec = next(spec for spec in models.CATALOG if spec.backend == "whisper.cpp")
+    content = native_payloads["whisper.cpp"]["ggml-base.bin"]
+    path = _write_native_model(tmp_path / spec.id, {"renamed.bin": content})
+    calls = _network(monkeypatch, native_payloads["whisper.cpp"])
+    progress: list[tuple[int, int, str]] = []
+    assert models.download_model(spec, tmp_path, lambda *args: progress.append(args), Event()) == path
+    assert progress == [(len(content), len(content), "Already installed")]
+    assert calls == []

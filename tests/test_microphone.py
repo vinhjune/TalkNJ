@@ -21,7 +21,11 @@ def controller(tmp_path, monkeypatch):
     devices = [(5, "Other mic [WASAPI]"), (19, "Chosen mic [WASAPI]")]
     monkeypatch.setattr(desktop, "list_input_devices", lambda: devices)
     current = desktop.Controller(application)
+    current.pool.waitForDone()
+    application.processEvents()
     yield current, devices
+    current.pool.waitForDone()
+    application.processEvents()
     current.request_quit()
     application.processEvents()
 

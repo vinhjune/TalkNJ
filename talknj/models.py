@@ -1,4 +1,4 @@
-"""Explicit model installation and local-only CTranslate2 Whisper discovery.
+"""Explicit model installation and local-only speech model discovery.
 
 Only download_model accesses the network. Installations are assembled beside the
 final directory and renamed only after integrity and offline metadata checks.
@@ -23,6 +23,8 @@ from urllib.request import Request, urlopen
 
 from tokenizers import Tokenizer
 
+from talknj._model_formats import PARAKEET_FILES, validate_ggml, validate_parakeet
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -31,6 +33,7 @@ class ModelSpec:
     repo: str
     size_mb: int
     languages: tuple[str, ...]
+    backend: str = "faster-whisper"
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,8 @@ class InstalledModel:
     path: Path
     name: str
     languages: tuple[str, ...]
+    backend: str = "faster-whisper"
+    model_file: str | None = None
 
 
 CATALOG = (
@@ -47,6 +52,11 @@ CATALOG = (
     ModelSpec("tiny", "Tiny multilingual", "Systran/faster-whisper-tiny", 78, ("en", "vi")),
     ModelSpec("base", "Base multilingual", "Systran/faster-whisper-base", 148, ("en", "vi")),
     ModelSpec("small", "Small multilingual", "Systran/faster-whisper-small", 488, ("en", "vi")),
+    ModelSpec("parakeet-tdt-0.6b-v2-int8", "Parakeet TDT 0.6B v2 (int8)",
+              "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", 662, ("en",),
+              "sherpa-onnx"),
+    ModelSpec("whisper.cpp-base", "Whisper Base (whisper.cpp)",
+              "ggerganov/whisper.cpp", 148, ("en", "vi"), "whisper.cpp"),
 )
 
 
@@ -63,6 +73,11 @@ _FILES = (
     "vocabulary.json", "vocabulary.txt",
 )
 _REQUIRED = {"config.json", "model.bin", "tokenizer.json"}
+_BACKEND_FILES = {
+    "faster-whisper": _FILES,
+    "sherpa-onnx": PARAKEET_FILES,
+    "whisper.cpp": ("ggml-base.bin",),
+}
 _CHUNK_BYTES = 256 * 1024
 _TIMEOUT_SECONDS = 10
 _JSON_LIMIT = 32 * 1024 * 1024
@@ -146,20 +161,37 @@ def _binary_vocabulary_size(path: Path) -> int:
 
 
 def validate_model(path: Path) -> InstalledModel:
-    """Validate a complete local Whisper export; never infer languages by name.
+    """Identify and validate a local model directory, without network access.
 
-    English-only tokenizers ALSO contain language tokens. Their end-of-text ID
-    is 50256 rather than 50257, so merely finding <|vi|> is not sufficient.
-    languages lists the languages supported by TalkNJ, not all Whisper codes.
-    A local tokenizer is mandatory, preventing faster-whisper's remote fallback.
-    Official Systran tokenizers can omit the CT2 vocabulary's 1501 timestamp
-    tokens: faster-whisper decodes those IDs arithmetically. Only that exact
-    canonical suffix may be absent; required special token IDs must still match.
+    Native weights are never loaded into memory by discovery. Each format
+    establishes its supported languages from verified weights/metadata rather
+    than directory names. Local CT2 tokenizers remain mandatory.
     """
     path = Path(path).expanduser().resolve()
     try:
         if not path.is_dir():
             raise ModelError(f"Model folder does not exist: {path}")
+        entries = tuple(path.iterdir())
+        relevant = set(_FILES) | set(PARAKEET_FILES)
+        for file in entries:
+            if (file.name in relevant or file.suffix == ".bin") and file.is_symlink():
+                raise ModelError(f"Model files must be inside the imported folder, not symbolic "
+                                 f"links: {file.name}.")
+            if (file.name in relevant or file.suffix == ".bin") and file.resolve().parent != path:
+                raise ModelError(f"Model file escapes the imported folder: {file.name}.")
+        has_parakeet = any((path / name).exists() for name in PARAKEET_FILES)
+        ggml = [file for file in entries if file.is_file() and file.suffix == ".bin"
+                and file.name != "model.bin"]
+        has_ct2 = any((path / name).exists() for name in ("model.bin", "config.json", "tokenizer.json"))
+        if sum((has_parakeet, bool(ggml), has_ct2)) > 1:
+            raise ModelError("This folder mixes multiple model formats. Import one model per folder.")
+        if has_parakeet:
+            validate_parakeet(path)
+            return InstalledModel(path, path.name, ("en",), "sherpa-onnx")
+        if ggml:
+            if len(ggml) != 1:
+                raise ModelError("Import a folder containing exactly one Whisper Base GGML .bin file.")
+            return InstalledModel(path, path.name, validate_ggml(ggml[0]), "whisper.cpp", ggml[0].name)
         missing = sorted(name for name in _REQUIRED if not (path / name).is_file())
         if missing:
             raise ModelError(f"Incomplete model in {path}: missing {', '.join(missing)}.")
@@ -285,11 +317,14 @@ def _manifest(spec: ModelSpec, cancel: Event) -> tuple[str, list[tuple[str, int,
         raise ModelError("The model server did not provide a valid pinned revision.")
     if not isinstance(siblings, list):
         raise ModelError("The model server did not provide a file list.")
+    allowed = _BACKEND_FILES[spec.backend]
     files: dict[str, tuple[str, int, str | None]] = {}
     for item in siblings:
-        if not isinstance(item, dict) or item.get("rfilename") not in _FILES:
+        if not isinstance(item, dict):
             continue
-        name = item["rfilename"]
+        name = item.get("rfilename")
+        if not isinstance(name, str) or name not in allowed:
+            continue
         size = item.get("size", 0)
         if type(size) is not int or size < 0:
             raise ModelError(f"Invalid download size for {name}.")
@@ -298,13 +333,22 @@ def _manifest(spec: ModelSpec, cancel: Event) -> tuple[str, list[tuple[str, int,
         if digest is not None and (not isinstance(digest, str)
                                    or not re.fullmatch(r"[a-fA-F0-9]{64}", digest)):
             raise ModelError(f"Invalid checksum metadata for {name}.")
+        if name in files:
+            raise ModelError(f"The model server returned duplicate metadata for {name}.")
+        if spec.backend != "faster-whisper" and name != "tokens.txt" and digest is None:
+            raise ModelError(f"The model server did not provide the required SHA256 for {name}.")
         files[name] = (name, size, digest)
-    if not _REQUIRED.issubset(files) or not {"vocabulary.txt", "vocabulary.json"}.intersection(files):
-        raise ModelError("The official repository is missing required offline Whisper model files.")
-    # CT2 prefers JSON. Do not download a redundant legacy vocabulary.
-    if "vocabulary.json" in files:
-        files.pop("vocabulary.txt", None)
-    return revision, [files[name] for name in _FILES if name in files]
+    if spec.backend == "faster-whisper":
+        complete = (_REQUIRED.issubset(files)
+                    and bool({"vocabulary.txt", "vocabulary.json"}.intersection(files)))
+        # CT2 prefers JSON. Do not download a redundant legacy vocabulary.
+        if "vocabulary.json" in files:
+            files.pop("vocabulary.txt", None)
+    else:
+        complete = set(allowed).issubset(files)
+    if not complete:
+        raise ModelError("The official repository is missing required offline model files.")
+    return revision, [files[name] for name in allowed if name in files]
 
 
 def download_model(
@@ -320,7 +364,7 @@ def download_model(
     never deleted or overwritten; the user must choose another destination.
     """
     if spec not in CATALOG:
-        raise ModelError("Only the official Systran models in the catalog may be downloaded.")
+        raise ModelError("Only the official models in the catalog may be downloaded.")
     _check_cancel(cancel)
     root = Path(root).expanduser().resolve()
     target = root / spec.id
@@ -333,9 +377,11 @@ def download_model(
             except ModelError as exc:
                 raise ModelError(f"An incomplete or invalid folder already exists at {target}. "
                                  "Move it aside or choose another model folder before downloading.") from exc
-            if installed.languages != spec.languages:
+            if installed.languages != spec.languages or installed.backend != spec.backend:
                 raise ModelError(f"The existing model at {target} does not match {spec.name}.")
-            total = sum((target / name).stat().st_size for name in _FILES if (target / name).is_file())
+            names = ((installed.model_file,) if installed.model_file
+                     else _BACKEND_FILES[spec.backend])
+            total = sum((target / name).stat().st_size for name in names if (target / name).is_file())
             progress(total, total, "Already installed")
             _check_cancel(cancel)
             return installed.path
@@ -372,8 +418,8 @@ def download_model(
                 raise ModelError(f"Checksum mismatch for {name}; the download was not installed.")
         _check_cancel(cancel)
         installed = validate_model(staging)
-        if installed.languages != spec.languages:
-            raise ModelError("Downloaded model metadata does not match its catalog languages.")
+        if installed.languages != spec.languages or installed.backend != spec.backend:
+            raise ModelError("Downloaded model metadata does not match its catalog backend/languages.")
         progress(done, total, "Installing validated model")
         _check_cancel(cancel)
         # Same-filesystem rename never exposes partially downloaded model files.

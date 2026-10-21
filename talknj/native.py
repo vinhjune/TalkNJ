@@ -16,7 +16,10 @@ import time
 from collections.abc import Callable, Collection
 from functools import lru_cache
 
-__all__ = ["HotkeyListener", "copy_text", "foreground_window", "type_text", "validate_hotkey"]
+__all__ = [
+    "HotkeyListener", "copy_text", "foreground_window", "format_hotkey", "type_text",
+    "validate_hotkey",
+]
 
 _LOG = logging.getLogger(__name__)
 _IS_WINDOWS = os.name == "nt"
@@ -118,6 +121,12 @@ def validate_hotkey(chord: str) -> str:
     return "+".join([name for name in _MODIFIERS if name in modifiers] + keys)
 
 
+def format_hotkey(chord: str) -> str:
+    """Present a canonical chord without exposing its storage grammar."""
+    names = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win", "space": "Space"}
+    return " + ".join(names.get(token, token.upper()) for token in validate_hotkey(chord).split("+"))
+
+
 class _WindowsAPI:
     """All pointer-sized Windows signatures live in one place."""
 
@@ -147,6 +156,8 @@ class _WindowsAPI:
         bind(user32, "SetWindowsHookExW", _HANDLE, ctypes.c_int, _HOOKPROC, _HANDLE, _DWORD)
         bind(user32, "UnhookWindowsHookEx", _BOOL, _HANDLE)
         bind(user32, "CallNextHookEx", _LRESULT, _HANDLE, ctypes.c_int, _ULONG_PTR, _LPARAM)
+        bind(user32, "RegisterHotKey", _BOOL, _HANDLE, ctypes.c_int, _UINT, _UINT)
+        bind(user32, "UnregisterHotKey", _BOOL, _HANDLE, ctypes.c_int)
         bind(user32, "PeekMessageW", _BOOL, ctypes.POINTER(_MSG), _HANDLE, _UINT, _UINT, _UINT)
         bind(user32, "GetMessageW", _BOOL, ctypes.POINTER(_MSG), _HANDLE, _UINT, _UINT)
         bind(user32, "TranslateMessage", _BOOL, ctypes.POINTER(_MSG))
@@ -381,6 +392,8 @@ class HotkeyListener:
         self._thread: threading.Thread | None = None
         self._thread_id = 0
         self._error: BaseException | None = None
+        self._suspended = False
+        self._waiting_for_release = False
 
     def start(self) -> None:
         _get_api()  # Fail clearly on unsupported platforms, before creating a thread.
@@ -424,6 +437,30 @@ class HotkeyListener:
         if self._error is not None:
             raise RuntimeError(f"The global hotkey listener failed: {self._error}") from self._error
 
+    def suspend(self) -> None:
+        """Silence capture gestures without removing the working Windows hook."""
+        with self._lock:
+            self._suspended = True
+            self._state.reset()
+
+    def resume(self) -> None:
+        """Rearm only after every shortcut key/modifier has been released."""
+        with self._lock:
+            self._state.reset()
+            self._waiting_for_release = True
+            self._suspended = False
+
+    def _update(self, down: Collection[int], *, allow_press: bool = True) -> None:
+        # Serialize notifications with suspension, including a queued UI capture.
+        with self._lock:
+            if self._suspended:
+                return
+            if self._waiting_for_release:
+                if not any(vk in down for vk in self._state.watched):
+                    self._waiting_for_release = False
+                return
+            self._notify(self._state.update(down, allow_press=allow_press))
+
     def _notify(self, transition: int) -> None:
         if transition > 0:
             self._on_press()
@@ -442,6 +479,19 @@ class HotkeyListener:
             self._thread_id = int(api.GetCurrentThreadId())
             message = _MSG()
             api.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+            # Probe the Windows reservation table before replacing a working
+            # listener. The hook remains non-suppressing; this reservation is
+            # immediately released and cannot detect other apps' local shortcuts.
+            tokens = self.chord.split("+")
+            flags = {"alt": 0x0001, "ctrl": 0x0002, "shift": 0x0004, "win": 0x0008}
+            modifiers = 0x4000 | sum(flags[token] for token in tokens[:-1])
+            if not api.RegisterHotKey(None, 1, modifiers, _KEY_VKS[tokens[-1]]):
+                raise _native_error(
+                    f"{format_hotkey(self.chord)} is unavailable. Windows may reserve it, "
+                    "or another app has registered it. Choose a different shortcut."
+                )
+            if not api.UnregisterHotKey(None, 1):
+                raise _native_error("Cannot release the temporary shortcut availability check.")
 
             def callback(code: int, wparam: int, lparam: int) -> int:
                 try:
@@ -456,7 +506,7 @@ class HotkeyListener:
                                 down.add(vk)
                             else:
                                 down.discard(vk)
-                            self._notify(self._state.update(down))
+                            self._update(down)
                 except BaseException as exc:
                     self._error = exc
                     self._stopping.set()
@@ -481,7 +531,7 @@ class HotkeyListener:
                 if result == 0:
                     break
                 if message.message == _WM_TIMER and message.wParam == timer:
-                    self._notify(self._state.update(self._snapshot(api), allow_press=False))
+                    self._update(self._snapshot(api), allow_press=False)
                 else:
                     api.TranslateMessage(ctypes.byref(message))
                     api.DispatchMessageW(ctypes.byref(message))

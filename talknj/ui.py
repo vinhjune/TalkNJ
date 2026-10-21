@@ -1,14 +1,15 @@
 """Qt widgets only; recording, inference and OS integration live outside the view."""
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
+    QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from talknj.models import CATALOG
+from talknj.native import format_hotkey, validate_hotkey
 
 
 STYLE = """
@@ -78,6 +79,131 @@ def card() -> tuple[QFrame, QVBoxLayout]:
     return frame, layout
 
 
+class ShortcutDialog(QDialog):
+    """Consume shortcut events before Qt actions can handle a captured chord."""
+
+    _MODIFIER_KEYS = {
+        Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta,
+    }
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setWindowTitle("Choose global shortcut")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self.chord = ""
+        self._down: set[tuple[int, int, int]] = set()
+        self._capturing = True
+        layout = QVBoxLayout(self)
+        layout.addWidget(label("Press your shortcut", "section"))
+        layout.addWidget(label(
+            "Hold Ctrl, Alt, Shift or Win, then press a letter, number, Space or F1–F12. "
+            "Release all keys, then choose Use shortcut. Escape cancels.", "muted", True))
+        self.preview = label("Waiting for keys…", "section")
+        layout.addWidget(self.preview)
+        self.feedback = label("Your current global shortcut is paused while this dialog is open.", "muted", True)
+        layout.addWidget(self.feedback)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.use_shortcut = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.use_shortcut.setText("Use shortcut")
+        self.use_shortcut.setEnabled(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def done(self, result: int) -> None:
+        # Hiding an accepted dialog can deactivate it before exec() returns.
+        self._capturing = False
+        super().done(result)
+
+    def eventFilter(self, watched, event) -> bool:
+        kind = event.type()
+        if watched is self and kind == QEvent.Type.WindowDeactivate and self._capturing:
+            self.reject()
+        if kind == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+        if kind not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            return False
+        if not isinstance(event, QKeyEvent):
+            return False
+        if event.isAutoRepeat():
+            return True
+        key = event.key()
+        physical_key = (key, event.nativeScanCode(), event.nativeVirtualKey())
+        if kind == QEvent.Type.KeyRelease:
+            self._down.discard(physical_key)
+            if not self._down:
+                self.use_shortcut.setEnabled(bool(self.chord))
+                if self.chord:
+                    self.feedback.setText(
+                        "Choose Use shortcut, or press a different chord. It is not active until you apply it.")
+                elif self.preview.text() == "Waiting for keys…":
+                    self.feedback.setText(
+                        "Modifiers alone are not a shortcut. Add a letter, number, Space or F1–F12.")
+            return True
+        if key == Qt.Key.Key_Escape:
+            self.reject()
+            return True
+        if not self._down:
+            self.chord = ""
+            self.preview.setText("Waiting for keys…")
+        self._down.add(physical_key)
+        self.use_shortcut.setEnabled(False)
+        if key in self._MODIFIER_KEYS:
+            return True
+        self.chord = ""
+        modifiers = event.modifiers()
+        names = [name for mask, name in (
+            (Qt.KeyboardModifier.ControlModifier, "ctrl"),
+            (Qt.KeyboardModifier.AltModifier, "alt"),
+            (Qt.KeyboardModifier.ShiftModifier, "shift"),
+            (Qt.KeyboardModifier.MetaModifier, "win"),
+        ) if modifiers & mask]
+        # Native virtual keys match the global hook even on non-US layouts.
+        # Qt-created events have no native code; use logical keys for those.
+        vk = event.nativeVirtualKey()
+        trigger = ""
+        if vk:
+            if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
+                trigger = chr(vk).lower()
+            elif vk == 0x20:
+                trigger = "space"
+            elif 0x70 <= vk <= 0x7B:
+                trigger = f"f{vk - 0x6F}"
+        elif Qt.Key.Key_A <= key <= Qt.Key.Key_Z or Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
+            trigger = chr(key).lower()
+        elif key == Qt.Key.Key_Space:
+            trigger = "space"
+        elif Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12:
+            trigger = f"f{key - Qt.Key.Key_F1 + 1}"
+        try:
+            if modifiers & Qt.KeyboardModifier.GroupSwitchModifier or key == Qt.Key.Key_AltGr:
+                raise ValueError("AltGr is not supported. Use Ctrl, Alt, Shift or Win instead.")
+            if sum(held[0] not in self._MODIFIER_KEYS for held in self._down) != 1:
+                raise ValueError("Choose exactly one letter, number, Space or F1–F12 with your modifiers.")
+            if not names or not trigger:
+                raise ValueError(
+                    "Use at least one of Ctrl, Alt, Shift or Win with a letter, number, Space or F1–F12.")
+            self.chord = validate_hotkey("+".join([*names, trigger]))
+        except ValueError as exc:
+            self.preview.setText("Unsupported shortcut")
+            self.feedback.setText(str(exc))
+        else:
+            self.preview.setText(format_hotkey(self.chord))
+            self.feedback.setText("Release all keys to use this shortcut.")
+        return True
+
+    def capture(self) -> str | None:
+        application = QApplication.instance()
+        application.installEventFilter(self)
+        try:
+            return self.chord if self.exec() == QDialog.DialogCode.Accepted and self.chord else None
+        finally:
+            application.removeEventFilter(self)
+
+
 class MainWindow(QMainWindow):
     record_requested = Signal()
     copy_requested = Signal()
@@ -88,6 +214,7 @@ class MainWindow(QMainWindow):
     refresh_requested = Signal()
     preferences_changed = Signal()
     hotkey_requested = Signal()
+    choose_hotkey_requested = Signal()
     model_changed = Signal(int)
     hide_requested = Signal()
 
@@ -210,7 +337,7 @@ class MainWindow(QMainWindow):
 
     def _models_page(self) -> None:
         layout = self._page("A model for your machine.",
-                            "Download once, dictate offline. Larger models trade speed for accuracy.")
+                            "Download once, dictate offline. Choose a model for your language and machine.")
         frame, box = card()
         box.addWidget(label("Active model", "section"))
         self.model = QComboBox()
@@ -220,6 +347,8 @@ class MainWindow(QMainWindow):
         box.addWidget(self.model_detail)
         row = QHBoxLayout()
         self.import_model = QPushButton("Use existing model folder")
+        self.import_model.setToolTip(
+            "Select a CTranslate2 Whisper, whisper.cpp GGML, or Parakeet ONNX model folder.")
         self.import_model.clicked.connect(self.import_requested)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh_requested)
@@ -291,17 +420,21 @@ class MainWindow(QMainWindow):
         refresh = QPushButton("Refresh microphones")
         refresh.clicked.connect(self.refresh_requested)
         box.addWidget(refresh)
-        box.addWidget(label("Punctuation is generated by Whisper. Recognition and punctuation accuracy depend on the model, microphone and speech. Select Small multilingual for better Vietnamese results.", "muted", True))
+        box.addWidget(label("Punctuation is generated by the selected speech model. Recognition and punctuation accuracy depend on the model, microphone and speech. Choose a model that supports Vietnamese for Vietnamese dictation.", "muted", True))
         layout.addWidget(frame)
         frame, box = card()
         box.addWidget(label("Global shortcut", "section"))
         row = QHBoxLayout()
-        self.hotkey = QLineEdit()
-        self.hotkey.setPlaceholderText("ctrl+alt+space")
-        self.hotkey.setAccessibleName("Global hotkey chord")
+        self.hotkey_chord = ""
+        self._hotkey_pending = False
+        self.hotkey = label("No shortcut selected", "section")
+        self.hotkey.setAccessibleName("Global shortcut")
+        self.choose_hotkey = QPushButton("Choose shortcut…")
+        self.choose_hotkey.clicked.connect(self.choose_hotkey_requested)
         self.apply_hotkey = QPushButton("Apply shortcut")
         self.apply_hotkey.clicked.connect(self.hotkey_requested)
         row.addWidget(self.hotkey, 1)
+        row.addWidget(self.choose_hotkey)
         row.addWidget(self.apply_hotkey)
         box.addLayout(row)
         self.hotkey_mode = QComboBox()
@@ -311,13 +444,26 @@ class MainWindow(QMainWindow):
         box.addWidget(self.hotkey_mode)
         self.hotkey_status = label("", "muted", True)
         box.addWidget(self.hotkey_status)
-        box.addWidget(label("Use ctrl, alt, shift or win with a letter, number, space or F1–F12. Choose a shortcut not used by your other apps; ordinary key events are not suppressed.", "muted", True))
+        box.addWidget(label("Choose shortcut, then press the keys you want. Escape cancels. Apply activates and saves your choice. Windows-reserved or registered shortcuts may be unavailable; other apps can still respond to ordinary key events.", "muted", True))
         layout.addWidget(frame)
         frame, box = card()
         box.addWidget(label("Background use & privacy", "section"))
         box.addWidget(label("Closing this window keeps TalkNJ in the system tray so your shortcut still works. Use the tray menu to quit. Recording stops automatically at five minutes. Typing never activates another window; if focus changes, recover your text from the clipboard.", "muted", True))
         layout.addWidget(frame)
         layout.addStretch()
+
+    def set_hotkey(self, chord: str, *, pending: bool = False) -> None:
+        self.hotkey_chord = validate_hotkey(chord) if chord else ""
+        self._hotkey_pending = pending and bool(self.hotkey_chord)
+        self.hotkey.setText(format_hotkey(chord) if self.hotkey_chord else "Choose a shortcut")
+        self.apply_hotkey.setEnabled(self._hotkey_pending)
+
+    def capture_hotkey(self) -> str | None:
+        dialog = ShortcutDialog(self)
+        try:
+            return dialog.capture()
+        finally:
+            dialog.deleteLater()
 
     def show_notice(self, message: str) -> None:
         self.notice.setText(message)
@@ -334,9 +480,10 @@ class MainWindow(QMainWindow):
                                    "recording": "Listening. Take your time.",
                                    "transcribing": "Finding the words, locally.",
                                    "delivering": "Your words are on their way."}.get(state, state))
-        for widget in (self.model, self.language, self.output, self.microphone, self.hotkey,
-                       self.hotkey_mode, self.apply_hotkey, self.import_model):
+        for widget in (self.model, self.language, self.output, self.microphone, self.choose_hotkey,
+                       self.hotkey_mode, self.import_model):
             widget.setEnabled(state == "idle")
+        self.apply_hotkey.setEnabled(state == "idle" and self._hotkey_pending)
         if not recording:
             self.level.setValue(0)
 

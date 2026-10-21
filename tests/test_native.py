@@ -18,6 +18,10 @@ class HotkeyValidationTests(unittest.TestCase):
         self.assertEqual(native.validate_hotkey("Alt+7"), "alt+7")
         self.assertEqual(native.validate_hotkey("SHIFT+Z"), "shift+z")
 
+    def test_friendly_shortcut_display(self) -> None:
+        self.assertEqual(native.format_hotkey("ctrl+alt+space"), "Ctrl + Alt + Space")
+        self.assertEqual(native.format_hotkey("win+shift+f12"), "Shift + Win + F12")
+
     def test_all_supported_trigger_keys(self) -> None:
         keys = [*"abcdefghijklmnopqrstuvwxyz0123456789", "space"]
         keys.extend(f"f{number}" for number in range(1, 13))
@@ -117,6 +121,38 @@ class ChordStateTests(unittest.TestCase):
             with self.subTest(vk=vk, scan=scan, flags=flags):
                 event = native._KBDLLHOOKSTRUCT(vk, scan, flags, 0, 0)
                 self.assertEqual(native._event_vk(event), expected)
+
+
+class ListenerSuspensionTests(unittest.TestCase):
+    def test_capture_is_silent_and_resume_waits_for_complete_release(self) -> None:
+        notifications: list[str] = []
+        listener = native.HotkeyListener(
+            "ctrl+a", lambda: notifications.append("press"), lambda: notifications.append("release"))
+        listener.suspend()
+        listener._update({0xA2, 0x41})
+        listener.resume()
+        listener._update({0xA2, 0x41})
+        listener._update({0xA2})
+        listener._update({0xA2, 0x41})
+        self.assertEqual(notifications, [])
+        listener._update(set(), allow_press=False)
+        listener._update({0xA2, 0x41})
+        listener._update(set())
+        self.assertEqual(notifications, ["press", "release"])
+
+    def test_suspension_clears_active_gesture_without_late_release(self) -> None:
+        pressed, released = Mock(), Mock()
+        listener = native.HotkeyListener("ctrl+a", pressed, released)
+        listener._update({0xA3, 0x41})
+        listener.suspend()
+        self.assertFalse(listener._state.active)
+        listener._update(set())
+        listener.resume()
+        listener._update(set())
+        listener._update({0xA3, 0x41})
+        listener._update(set())
+        self.assertEqual(pressed.call_count, 2)
+        released.assert_called_once_with()
 
 
 class InputLayoutTests(unittest.TestCase):
@@ -434,6 +470,8 @@ class _HookAPI:
         self.unhooked: list[int] = []
         self.killed: list[int] = []
         self.installed = None
+        self.probed: list[tuple[int, int]] = []
+        self.unregistered: list[int] = []
 
     def GetCurrentThreadId(self) -> int:
         return 77
@@ -443,6 +481,14 @@ class _HookAPI:
 
     def GetModuleHandleW(self, name: str | None) -> int:
         return 123
+
+    def RegisterHotKey(self, window: object, identifier: int, modifiers: int, key: int) -> int:
+        self.probed.append((modifiers, key))
+        return 1
+
+    def UnregisterHotKey(self, window: object, identifier: int) -> int:
+        self.unregistered.append(identifier)
+        return 1
 
     def SetWindowsHookExW(self, kind: int, callback: object, module: int, thread: int) -> int:
         self.callback = callback
@@ -523,6 +569,8 @@ class HookBehaviorTests(unittest.TestCase):
         self.assertEqual(api.installed, (13, 123, 0))
         self.assertEqual(api.killed, [555])
         self.assertEqual(api.unhooked, [321])
+        self.assertEqual(api.probed, [(0x4003, 0x20)])
+        self.assertEqual(api.unregistered, [1])
         self.assertIsNone(listener._error)
 
     def test_lost_modifier_release_is_recovered_by_poll(self) -> None:
@@ -578,6 +626,20 @@ class HookBehaviorTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(callback_threads, [thread.ident, thread.ident])
         self.assertNotEqual(thread.ident, threading.get_ident())
+
+    def test_unavailable_registered_chord_fails_before_hook_installation(self) -> None:
+        api = _HookAPI([])
+        listener = native.HotkeyListener("ctrl+a", Mock(), Mock())
+        with (
+            patch.object(native, "_get_api", return_value=api),
+            patch.object(api, "RegisterHotKey", return_value=0),
+            patch.object(native, "_native_error", side_effect=lambda message: RuntimeError(message)),
+            self.assertLogs(native._LOG, level="ERROR"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unavailable.*another app"):
+                listener.start()
+        self.assertIsNone(api.installed)
+        self.assertEqual(api.unregistered, [])
 
     def test_startup_failure_reaches_caller_and_stop_reports_error(self) -> None:
         api = _HookAPI([])

@@ -1,0 +1,15 @@
+# Integration and verification
+- [x] Real speech fixture transcribes through both new CPU backends with network blocked during inference.
+- [x] Actual Windows shortcut picker, global gestures and model selection are exercised and observed.
+- [x] Relevant regression tests and static checks pass, followed by affected standalone build/runtime smoke.
+- [x] Review findings are addressed; README covers engine tradeoffs/formats and capture steps, preserving honest limits.
+- [x] Explain the five-minute application safety cap without changing it.
+- [x] Explain real-time feasibility and recommend revisable preview before final delivery; leave streaming behavior unchanged.
+
+## Verification evidence
+- Latest default suite: 198 passed, 3 skipped (two opt-in local-native cases and Windows symlink permission), with the documented CTranslate2/setuptools deprecation warning. Both native integration regressions already passed with local assets. Ruff passes; `pip check` reports no broken requirements.
+- Permanent opt-in native regressions are `tests/test_native_engines_integration.py`; model and JFK fixture paths are explicit local prerequisites. A real full-five-minute tail-speech check failed before bounded local VAD segmentation and passed afterward. Repeated real whisper.cpp PCM calls reuse one live worker.
+- Actual Windows picker, Apply/persistence, Escape cancellation, both global gesture modes and backend selection passed. Screenshots were visually inspected. Three Qt regressions failed before fixes and passed after: accepted-dialog deactivation, both Ctrl keys held, and recording Ctrl+Q colliding with Quit.
+- Review also moved checksum discovery/imports off the GUI thread and released failed native engines before the user's next explicit recording. No automatic recording retry, cloud fallback, streaming mode or recording-limit change was added.
+- Initial standalone runtime smoke caught missing vendored `jaraco` before the window opened; the spec now exposes setuptools' vendor directory to dependency analysis. The rebuilt bundle opens and exits via Ctrl+Q with both backend selections. Its actual executable also transcribed local JFK speech in bundled child processes, with Python removed from `PATH` and imports restricted to the shipped files; both native engines close cleanly and whisper.cpp reuses its worker. Desktop screenshots were visually inspected. This does not claim a separate Python-free-machine installation test.
+- Follow-up advisory review: a real Win-first Ctrl+Win+F9 gesture remained in the picker through release and was accepted; no Win-key cancellation failure was reproduced, so focus-loss cancellation is retained. Two fast permanent cases now verify that all Parakeet spans are joined in order and blank decoded spans do not introduce text gaps. Existing real whisper.cpp integration coverage is retained instead of restoring forwarding-only mocks. Backend metadata, format-specific validation, allowlisted raw-file downloads and atomic installation already address the archive/format concern; there is no archive-extraction path.
