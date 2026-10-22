@@ -5,16 +5,16 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QIcon, QInputEvent, QKeyEvent
+from PySide6.QtGui import QIcon, QInputEvent, QKeyEvent, QPainter
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame,
     QHBoxLayout, QLabel, QListView, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QStackedWidget, QStyledItemDelegate, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QStackedWidget, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
 from talknj.audio import MAX_SECONDS
 from talknj.models import CATALOG
-from talknj.native import format_hotkey, validate_hotkey
+from talknj.native import _KEY_VKS, format_hotkey, validate_hotkey
 
 
 STYLE = """
@@ -38,12 +38,16 @@ QPushButton#primary:hover { background: #3d4fbd; }
 QPushButton#primary:disabled { background: #c1c7e7; color: #f7f8ff; }
 QPushButton#nav { text-align: left; border: none; background: transparent; padding: 12px 16px; }
 QPushButton#nav:checked { color: #3e50bc; background: #edf0ff; }
+QPushButton#toggle, QPushButton#compact { padding: 7px 10px; }
+QPushButton#toggle:checked { background: #4c5fd5; color: white; border-color: #4c5fd5; }
+QPushButton#toggle:disabled { background: #e2e6ed; color: #69748a; border-color: #e2e6ed; }
 QLineEdit { background: #ffffff; border: 1px solid #d8dfeb; border-radius: 7px;
     padding: 9px; min-height: 20px; selection-background-color: #4c5fd5; }
 QLineEdit:disabled { color: #9ba4b5; }
 QComboBox { background: #ffffff; border: 1px solid #d8dfeb; border-radius: 8px;
     padding: 9px 38px 9px 12px; min-height: 20px; combobox-popup: 0;
     selection-background-color: #4c5fd5; }
+QComboBox#dictationLanguage { padding: 7px 28px 7px 8px; }
 QComboBox:hover { background: #f8f9ff; border-color: #a5afe0; }
 QComboBox:focus, QComboBox:on { border-color: #4c5fd5; background: #f5f7ff; }
 QComboBox:disabled { color: #9ba4b5; background: #f3f4f7; border-color: #e2e6ed; }
@@ -93,6 +97,8 @@ def countdown_text(elapsed_seconds: float = 0) -> str:
 def combo_box() -> QComboBox:
     """Use an owned Qt popup/delegate so the stylesheet works on both platforms."""
     combo = QComboBox()
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    combo.setMinimumContentsLength(12)
     view = QListView(combo)
     view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     combo.setView(view)
@@ -133,6 +139,7 @@ class ShortcutDialog(QDialog):
         Qt.Key.Key_Shift: Qt.KeyboardModifier.ShiftModifier,
         Qt.Key.Key_Meta: Qt.KeyboardModifier.MetaModifier,
     }
+    _TRIGGER_KEYS = {code: token for token, code in _KEY_VKS.items()}
 
     def __init__(self, parent: QWidget):
         super().__init__(parent)
@@ -146,7 +153,8 @@ class ShortcutDialog(QDialog):
         layout.addWidget(label("Press your shortcut", "section"))
         modifier_names = "Control, Option, Shift or Cmd" if sys.platform == "darwin" else "Ctrl, Alt, Shift or Win"
         layout.addWidget(label(
-            f"Hold {modifier_names}, then press a letter, number, Space or F1–F12. "
+            f"Use two or more of {modifier_names}, or combine a modifier with a letter, "
+            "number, punctuation key, Space or F1–F12. "
             "Release all keys, then choose Use shortcut. Escape cancels.", "muted", True))
         self.preview = label("Waiting for keys…", "section")
         layout.addWidget(self.preview)
@@ -197,7 +205,7 @@ class ShortcutDialog(QDialog):
                         "Choose Use shortcut, or press a different chord. It is not active until you apply it.")
                 elif self.preview.text() == "Waiting for keys…":
                     self.feedback.setText(
-                        "Modifiers alone are not a shortcut. Add a letter, number, Space or F1–F12.")
+                        "Use two different modifiers, or add a letter, number, punctuation, Space or F1–F12.")
             return True
         if key == Qt.Key.Key_Escape:
             self.reject()
@@ -207,10 +215,13 @@ class ShortcutDialog(QDialog):
             self.preview.setText("Waiting for keys…")
         self._down.add(physical_key)
         self.use_shortcut.setEnabled(False)
-        if key in self._MODIFIER_KEYS:
-            return True
         self.chord = ""
         modifiers = event.modifiers()
+        if key in self._MODIFIER_KEYS:
+            modifiers = QInputEvent.modifiers(event) | self._MODIFIER_KEYS[key]
+        for held, _, _ in self._down:
+            if held in self._MODIFIER_KEYS:
+                modifiers |= self._MODIFIER_KEYS[held]
         # Qt maps ControlModifier to Command and MetaModifier to Control on macOS.
         names = [name for mask, name in (
             (Qt.KeyboardModifier.ControlModifier, "win" if sys.platform == "darwin" else "ctrl"),
@@ -220,30 +231,30 @@ class ShortcutDialog(QDialog):
         ) if modifiers & mask]
         # Only Windows virtual keys share the codes expected by its global hook.
         # macOS nativeVirtualKey is a hardware code, not a Windows VK identity.
-        vk = event.nativeVirtualKey() if sys.platform == "win32" else 0
+        triggers = [held for held in self._down if held[0] not in self._MODIFIER_KEYS]
         trigger = ""
-        if vk:
-            if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
-                trigger = chr(vk).lower()
-            elif vk == 0x20:
+        if len(triggers) == 1:
+            trigger_key, _, native_vk = triggers[0]
+            vk = native_vk if sys.platform == "win32" else 0
+            if vk:
+                trigger = self._TRIGGER_KEYS.get(vk, "")
+            elif 0x21 <= trigger_key <= 0x7E:
+                trigger = chr(trigger_key).lower()
+            elif trigger_key == Qt.Key.Key_Space:
                 trigger = "space"
-            elif 0x70 <= vk <= 0x7B:
-                trigger = f"f{vk - 0x6F}"
-        elif Qt.Key.Key_A <= key <= Qt.Key.Key_Z or Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
-            trigger = chr(key).lower()
-        elif key == Qt.Key.Key_Space:
-            trigger = "space"
-        elif Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12:
-            trigger = f"f{key - Qt.Key.Key_F1 + 1}"
+            elif Qt.Key.Key_F1 <= trigger_key <= Qt.Key.Key_F12:
+                trigger = f"f{trigger_key - Qt.Key.Key_F1 + 1}"
         try:
             if modifiers & Qt.KeyboardModifier.GroupSwitchModifier or key == Qt.Key.Key_AltGr:
                 raise ValueError("AltGr is not supported. Choose another modifier combination.")
-            if sum(held[0] not in self._MODIFIER_KEYS for held in self._down) != 1:
-                raise ValueError("Choose exactly one letter, number, Space or F1–F12 with your modifiers.")
-            if not names or not trigger:
-                raise ValueError(
-                    "Use at least one modifier with a letter, number, Space or F1–F12.")
-            self.chord = validate_hotkey("+".join([*names, trigger]))
+            if len(triggers) > 1:
+                raise ValueError("Choose exactly one non-modifier key with your modifiers.")
+            if not triggers and len(names) < 2:
+                self.feedback.setText("Add another modifier or a letter, number, punctuation, Space or F1–F12.")
+                return True
+            if triggers and not trigger:
+                raise ValueError("Choose a letter, number, punctuation, Space or F1–F12 with your modifiers.")
+            self.chord = validate_hotkey("+".join(names + ([trigger] if trigger else [])))
         except ValueError as exc:
             self.preview.setText("Unsupported shortcut")
             self.feedback.setText(str(exc))
@@ -261,6 +272,17 @@ class ShortcutDialog(QDialog):
             application.removeEventFilter(self)
 
 
+class _HotkeyLabel(QLabel):
+    """Keep the full accessible chord while fitting narrow settings rows."""
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setPen(self.palette().windowText().color())
+        text = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width())
+        painter.drawText(self.contentsRect(), self.alignment(), text)
+
+
 class MainWindow(QMainWindow):
     record_requested = Signal()
     copy_requested = Signal()
@@ -270,7 +292,6 @@ class MainWindow(QMainWindow):
     storage_requested = Signal()
     refresh_requested = Signal()
     preferences_changed = Signal()
-    hotkey_requested = Signal()
     choose_hotkey_requested = Signal()
     model_changed = Signal(int)
     hide_requested = Signal()
@@ -299,7 +320,7 @@ class MainWindow(QMainWindow):
         side.addSpacing(35)
         self.pages = QStackedWidget()
         self.nav = []
-        for index, title in enumerate(("Dictation", "Model library", "Preferences", "About")):
+        for index, title in enumerate(("Dictation", "Preferences", "About")):
             button = QPushButton(title)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -321,7 +342,6 @@ class MainWindow(QMainWindow):
         content.addWidget(self.pages, 1)
         outer.addLayout(content, 1)
         self._dictation_page()
-        self._models_page()
         self._preferences_page()
         self._about_page()
         self.navigate(0)
@@ -335,7 +355,7 @@ class MainWindow(QMainWindow):
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(12)
         layout.addWidget(label(title, "title"))
         layout.addWidget(label(subtitle, "muted", True))
         scroll = QScrollArea()
@@ -345,17 +365,15 @@ class MainWindow(QMainWindow):
         return layout
 
     def _dictation_page(self) -> None:
-        layout = self._page("Speak naturally. Stay local.",
-                            "Turn your voice into text, without sending your audio anywhere.")
+        layout = self._page("Dictation", "Local speech-to-text. Your audio stays on this computer.")
         frame, box = card()
+        box.setContentsMargins(18, 14, 18, 14)
         heading = QHBoxLayout()
         heading.addWidget(label("VOICE CAPTURE", "eyebrow"))
         heading.addStretch()
         self.status = label("Ready", "status")
         heading.addWidget(self.status)
         box.addLayout(heading)
-        self.capture_title = label("Make room for your next thought.", "section")
-        box.addWidget(self.capture_title)
         self.capture_hint = label("Download a model to start dictating.", "muted", True)
         box.addWidget(self.capture_hint)
         self.level = QProgressBar()
@@ -373,8 +391,55 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.elapsed)
         controls.addStretch()
         box.addLayout(controls)
-        self.delivery_hint = label("Clipboard only · Nothing is typed automatically", "muted", True)
+        self.delivery_hint = label("Global hotkey: types into your app + copies. Recording button: clipboard preview only.", "muted", True)
         box.addWidget(self.delivery_hint)
+        layout.addWidget(frame)
+        frame, box = card()
+        box.setContentsMargins(14, 14, 14, 14)
+        box.setSpacing(10)
+        box.addWidget(label("Dictation settings", "section"))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.push_to_talk = QPushButton("Push to talk")
+        self.push_to_talk.setObjectName("toggle")
+        self.push_to_talk.setCheckable(True)
+        self.push_to_talk.setAccessibleName("Push to talk")
+        self.push_to_talk.setToolTip("On: hold to talk. Off: press to start, press again to stop.")
+        self.push_to_talk.toggled.connect(self.preferences_changed)
+        row.addWidget(self.push_to_talk)
+        row.addWidget(label("Language"))
+        self.language = combo_box()
+        self.language.setObjectName("dictationLanguage")
+        self.language.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.language.setMinimumWidth(108)
+        self.language.setMaximumWidth(160)
+        self.language.addItem("English", "en")
+        self.language.addItem("Vietnamese", "vi")
+        self.language.setAccessibleName("Dictation language")
+        self.language.setToolTip("Vietnamese requires a multilingual model in Preferences.")
+        self.language.currentIndexChanged.connect(self.preferences_changed)
+        row.addWidget(self.language)
+        row.addStretch(1)
+        row.addWidget(label("Hotkey"))
+        self.hotkey_chord = ""
+        self.hotkey = _HotkeyLabel("Choose a shortcut")
+        self.hotkey.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.hotkey.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.hotkey.setMinimumWidth(80)
+        self.hotkey.setAccessibleName("Global hotkey")
+        self.hotkey.setToolTip("Global shortcuts also reach other apps. Choose an unused key combination.")
+        row.addWidget(self.hotkey)
+        self.choose_hotkey = QPushButton("Edit")
+        self.choose_hotkey.setObjectName("compact")
+        self.choose_hotkey.setIcon(QIcon(str(Path(__file__).parent / "assets" / "edit.svg")))
+        self.choose_hotkey.setAccessibleName("Edit global hotkey")
+        self.choose_hotkey.clicked.connect(self.choose_hotkey_requested)
+        row.addWidget(self.choose_hotkey)
+        box.addLayout(row)
+        box.addWidget(label("Hold and release with Push to talk enabled; otherwise, press to start/stop.", "muted", True))
+        self.hotkey_status = label("", "muted", True)
+        self.hotkey_status.hide()
+        box.addWidget(self.hotkey_status)
         layout.addWidget(frame)
         row = QHBoxLayout()
         row.addWidget(label("Latest transcript", "section"))
@@ -393,121 +458,79 @@ class MainWindow(QMainWindow):
         self.result = label("Audio is held in memory only. Transcripts are not saved to disk.", "muted", True)
         layout.addWidget(self.result)
 
-    def _models_page(self) -> None:
-        layout = self._page("A model for your machine.",
-                            "Download once, dictate offline. Choose a model for your language and machine.")
+    def _preferences_page(self) -> None:
+        layout = self._page("Preferences", "Microphone and local speech models. Changes save automatically.")
         frame, box = card()
-        box.addWidget(label("Active model", "section"))
-        self.model = combo_box()
-        self.model.currentIndexChanged.connect(self.model_changed)
-        box.addWidget(self.model)
-        self.model_detail = label("No model installed", "muted", True)
-        box.addWidget(self.model_detail)
         row = QHBoxLayout()
-        self.import_model = QPushButton("Use existing model folder")
+        row.addWidget(label("Microphone", "section"))
+        self.microphone = combo_box()
+        self.microphone.setAccessibleName("Microphone")
+        self.microphone.setPlaceholderText("Choose an available microphone")
+        self.microphone.currentIndexChanged.connect(self.preferences_changed)
+        row.addWidget(self.microphone, 1)
+        refresh = QPushButton("Refresh")
+        refresh.setToolTip("Refresh microphones and local models")
+        refresh.clicked.connect(self.refresh_requested)
+        row.addWidget(refresh)
+        box.addLayout(row)
+        layout.addWidget(frame)
+        frame, box = card()
+        box.addWidget(label("Model library", "section"))
+        row = QHBoxLayout()
+        row.addWidget(label("Active model"))
+        self.model = combo_box()
+        self.model.setAccessibleName("Active model")
+        self.model.currentIndexChanged.connect(self.model_changed)
+        row.addWidget(self.model, 1)
+        self.import_model = QPushButton("Use existing folder")
         self.import_model.setToolTip(
             "Select a CTranslate2 Whisper, whisper.cpp GGML, or Parakeet ONNX model folder.")
         self.import_model.clicked.connect(self.import_requested)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh_requested)
         row.addWidget(self.import_model)
-        row.addWidget(refresh)
-        row.addStretch()
         box.addLayout(row)
-        layout.addWidget(frame)
+        self.model_detail = label("No model installed", "muted", True)
+        box.addWidget(self.model_detail)
+        box.addWidget(label("Download once, dictate offline. Vietnamese needs a multilingual model.", "muted", True))
         self.download_buttons = {}
         for spec in CATALOG:
-            frame, box = card()
             row = QHBoxLayout()
             details = QVBoxLayout()
-            details.addWidget(label(spec.name, "section"))
+            details.setSpacing(2)
+            details.addWidget(label(spec.name, wrap=True))
             languages = "English only" if spec.languages == ("en",) else "English + Vietnamese"
-            details.addWidget(label(f"{languages} · Approx. {spec.size_mb} MB download", "muted"))
+            details.addWidget(label(f"{languages} · ~{spec.size_mb} MB", "muted"))
             row.addLayout(details, 1)
             button = QPushButton("Download")
             button.clicked.connect(lambda checked=False, key=spec.id: self.download_requested.emit(key))
             self.download_buttons[spec.id] = button
             row.addWidget(button)
             box.addLayout(row)
-            layout.addWidget(frame)
+        layout.addWidget(frame)
         frame, box = card()
-        box.addWidget(label("Model storage", "section"))
+        row = QHBoxLayout()
+        row.addWidget(label("Model storage", "section"), 1)
+        self.browse_storage = QPushButton("Change folder")
+        self.browse_storage.clicked.connect(self.storage_requested)
+        row.addWidget(self.browse_storage)
+        box.addLayout(row)
         self.storage = label("", "muted", True)
         self.storage.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(self.storage)
-        self.browse_storage = QPushButton("Choose download location")
-        self.browse_storage.clicked.connect(self.storage_requested)
-        box.addWidget(self.browse_storage)
         self.download_progress = QProgressBar()
         self.download_progress.setRange(0, 100)
         self.download_progress.setTextVisible(False)
         self.download_progress.hide()
         box.addWidget(self.download_progress)
-        self.download_status = label("Downloads use Hugging Face. Inference never needs a connection.", "muted", True)
+        self.download_status = label("Downloads use Hugging Face. Inference stays offline.", "muted", True)
         box.addWidget(self.download_status)
         self.cancel_download = QPushButton("Cancel download")
         self.cancel_download.clicked.connect(self.cancel_download_requested)
         self.cancel_download.hide()
         box.addWidget(self.cancel_download)
         layout.addWidget(frame)
-        layout.addStretch()
-
-    def _preferences_page(self) -> None:
-        layout = self._page("Make it feel like yours.",
-                            "Changes are saved on this machine. No account or sync.")
-        frame, box = card()
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(25)
-        grid.setVerticalSpacing(18)
-        self.language = combo_box()
-        self.language.addItem("English", "en")
-        self.language.addItem("Vietnamese — multilingual model required", "vi")
-        self.output = combo_box()
-        self.output.addItem("Clipboard only — copy, do not type", "clipboard")
-        self.output.addItem("Type into active app + keep clipboard copy", "type")
-        self.microphone = combo_box()
-        self.microphone.setPlaceholderText("Choose an available microphone")
-        for row, (title, widget) in enumerate((
-            ("Dictation language", self.language), ("Text delivery", self.output),
-            ("Microphone", self.microphone),
-        )):
-            grid.addWidget(label(title), row, 0)
-            grid.addWidget(widget, row, 1)
-            widget.currentIndexChanged.connect(self.preferences_changed)
-        box.addLayout(grid)
-        refresh = QPushButton("Refresh microphones")
-        refresh.clicked.connect(self.refresh_requested)
-        box.addWidget(refresh)
-        box.addWidget(label("Punctuation is generated by the selected speech model. Recognition and punctuation accuracy depend on the model, microphone and speech. Choose a model that supports Vietnamese for Vietnamese dictation.", "muted", True))
-        layout.addWidget(frame)
-        frame, box = card()
-        box.addWidget(label("Global shortcut", "section"))
-        row = QHBoxLayout()
-        self.hotkey_chord = ""
-        self._hotkey_pending = False
-        self.hotkey = label("No shortcut selected", "section")
-        self.hotkey.setAccessibleName("Global shortcut")
-        self.choose_hotkey = QPushButton("Choose shortcut…")
-        self.choose_hotkey.clicked.connect(self.choose_hotkey_requested)
-        self.apply_hotkey = QPushButton("Apply shortcut")
-        self.apply_hotkey.clicked.connect(self.hotkey_requested)
-        row.addWidget(self.hotkey, 1)
-        row.addWidget(self.choose_hotkey)
-        row.addWidget(self.apply_hotkey)
-        box.addLayout(row)
-        self.hotkey_mode = combo_box()
-        self.hotkey_mode.addItem("Hold to talk — release to transcribe", "hold")
-        self.hotkey_mode.addItem("Press to start — press again to stop", "toggle")
-        self.hotkey_mode.currentIndexChanged.connect(self.preferences_changed)
-        box.addWidget(self.hotkey_mode)
-        self.hotkey_status = label("", "muted", True)
-        box.addWidget(self.hotkey_status)
-        box.addWidget(label("Choose shortcut, then press the keys you want. Escape cancels. Apply activates and saves your choice. System-reserved or registered shortcuts may be unavailable; other apps can still respond to ordinary key events.", "muted", True))
-        layout.addWidget(frame)
-        frame, box = card()
-        box.addWidget(label("Background use & privacy", "section"))
-        box.addWidget(label("Closing this window keeps TalkNJ running in the background so your shortcut still works. Use the tray or menu-bar icon to quit. Recording stops automatically at five minutes. Typing never activates another window; if focus changes, recover your text from the clipboard.", "muted", True))
-        layout.addWidget(frame)
+        layout.addWidget(label("Closing the window keeps your hotkey active. Quit from the tray or menu-bar icon. "
+                               "Recordings stop at five minutes. If focus changes, recover your text from the clipboard.",
+                               "muted", True))
         layout.addStretch()
 
     def _about_page(self) -> None:
@@ -523,11 +546,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(frame)
         layout.addStretch()
 
-    def set_hotkey(self, chord: str, *, pending: bool = False) -> None:
+    def set_hotkey(self, chord: str) -> None:
         self.hotkey_chord = validate_hotkey(chord) if chord else ""
-        self._hotkey_pending = pending and bool(self.hotkey_chord)
         self.hotkey.setText(format_hotkey(chord) if self.hotkey_chord else "Choose a shortcut")
-        self.apply_hotkey.setEnabled(self._hotkey_pending)
+        self.hotkey.setToolTip(
+            f"{self.hotkey.text()}\nGlobal shortcuts also reach other apps. Choose an unused key combination.")
 
     def capture_hotkey(self) -> str | None:
         dialog = ShortcutDialog(self)
@@ -547,14 +570,9 @@ class MainWindow(QMainWindow):
         self.record.setEnabled(recording or (available and not busy))
         self.status.setText({"idle": "Ready" if available else "Setup needed", "recording": "Recording",
                              "transcribing": "Transcribing", "delivering": "Delivering"}.get(state, state))
-        self.capture_title.setText({"idle": "Make room for your next thought.",
-                                   "recording": "Listening. Take your time.",
-                                   "transcribing": "Finding the words, locally.",
-                                   "delivering": "Your words are on their way."}.get(state, state))
-        for widget in (self.model, self.language, self.output, self.microphone, self.choose_hotkey,
-                       self.hotkey_mode, self.import_model):
+        for widget in (self.model, self.language, self.microphone, self.choose_hotkey,
+                       self.push_to_talk, self.import_model):
             widget.setEnabled(state == "idle")
-        self.apply_hotkey.setEnabled(state == "idle" and self._hotkey_pending)
         if not recording:
             self.level.setValue(0)
 

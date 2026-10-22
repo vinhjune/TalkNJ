@@ -6,7 +6,7 @@ from talknj.settings import Settings, load_settings, save_settings
 
 def test_preferences_round_trip_with_unicode_and_imports(tmp_path):
     path = tmp_path / "config" / "settings.json"
-    settings = Settings(model_root=str(tmp_path / "Mô hình"), language="vi", output_mode="type",
+    settings = Settings(model_root=str(tmp_path / "Mô hình"), language="vi",
                         hotkey_mode="toggle", imported_models=[str(tmp_path / "existing")],
                         microphone="Microphone tiếng Việt [Windows WASAPI]")
     save_settings(settings, path)
@@ -21,15 +21,15 @@ def test_corrupt_file_is_preserved_for_recovery(tmp_path):
     original = path.read_bytes()
     settings, warning = load_settings(path)
     assert warning
-    assert settings.output_mode == "clipboard"
+    assert settings == Settings()
     assert path.read_bytes() == original
 
 
-def test_unknown_values_cannot_enable_automatic_typing(tmp_path):
+def test_unknown_language_and_activation_mode_use_supported_values(tmp_path):
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"output_mode": "execute", "language": "xx", "hotkey_mode": "repeat"}), encoding="utf-8")
+    path.write_text(json.dumps({"language": "xx", "hotkey_mode": "repeat"}), encoding="utf-8")
     settings, warning = load_settings(path)
-    assert (settings.output_mode, settings.language, settings.hotkey_mode) == ("clipboard", "en", "hold")
+    assert (settings.language, settings.hotkey_mode) == ("en", "hold")
 
 
 def test_invalid_import_list_does_not_reach_model_scanner(tmp_path):
@@ -87,7 +87,7 @@ def test_macos_legacy_preferences_preserve_external_models_without_moving_files(
     legacy = tmp_path / "AppData" / "Local" / "TalkNJ" / "settings.json"
     existing = Settings(model_root=str(tmp_path / "external models"), model_path="/Volumes/Voice/model",
                         imported_models=["/Volumes/Archive/weights"], hotkey="win+shift+f2",
-                        language="vi", output_mode="type", hotkey_mode="toggle")
+                        language="vi", hotkey_mode="toggle")
     save_settings(existing, legacy)
     original = legacy.read_bytes()
     restored, warning = load_settings()
@@ -139,3 +139,14 @@ def test_explicit_missing_settings_path_never_probes_legacy(tmp_path, monkeypatc
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "legacy"))
     save_settings(Settings(language="vi"), tmp_path / "legacy" / "TalkNJ" / "settings.json")
     assert load_settings(tmp_path / "explicit.json") == (Settings(), "")
+
+
+def test_legacy_delivery_preference_does_not_discard_other_saved_settings(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"output_mode": "clipboard", "language": "vi",
+                                "hotkey": "ctrl+f2", "hotkey_mode": "toggle"}), encoding="utf-8")
+    restored, warning = load_settings(path)
+    assert not warning
+    assert (restored.language, restored.hotkey, restored.hotkey_mode) == ("vi", "ctrl+f2", "toggle")
+    save_settings(restored, path)
+    assert "output_mode" not in json.loads(path.read_text(encoding="utf-8"))

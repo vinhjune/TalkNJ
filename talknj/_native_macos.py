@@ -118,9 +118,10 @@ def foreground_window() -> _Target | int:
         pid = int(process.processIdentifier())
         if pid == os.getpid():
             return 0
-        _require_accessibility(api)
-        application = api.ax.AXUIElementCreateApplication(pid)
+        application = None
         try:
+            _require_accessibility(api)
+            application = api.ax.AXUIElementCreateApplication(pid)
             if application is None:
                 raise RuntimeError("Cannot inspect the foreground application. The transcript remains copied for manual pasting.")
             # Bound callback work even if the foreground app is unresponsive.
@@ -132,8 +133,8 @@ def foreground_window() -> _Target | int:
             _validate_target(api, target)
             return target
         except RuntimeError as exc:
-            # Clipboard-only dictation must still work in apps without AX focus.
-            # Retain the reason so type mode reports refusal instead of guessing.
+            # Keep clipboard recovery available in apps without AX focus.
+            # Retain the refusal reason instead of guessing a typing target.
             return _Target(pid, process, process.launchDate(), application, None, None, str(exc))
 
 
@@ -244,6 +245,8 @@ def type_text(target: object, text: str) -> None:
 
 
 def _key_identity(api: _MacAPI, event: object, code: int) -> int | None:
+    from talknj.native import _KEY_VKS
+
     if code in _FUNCTION_CODES:
         return _FUNCTION_CODES[code]
     if code == 49:
@@ -259,10 +262,8 @@ def _key_identity(api: _MacAPI, event: object, code: int) -> int | None:
     characters = (native.charactersIgnoringModifiers() if flags &
                   (q.kCGEventFlagMaskControl | q.kCGEventFlagMaskAlternate) else native.characters())
     characters = str(characters or "").lower()
-    if len(characters) == 1 and ("a" <= characters <= "z" or "0" <= characters <= "9"):
-        return ord(characters.upper())
-    if characters == " ":
-        return 0x20
+    if len(characters) == 1:
+        return _KEY_VKS.get("space" if characters == " " else characters)
     return None
 
 

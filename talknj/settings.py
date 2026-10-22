@@ -25,7 +25,6 @@ class Settings:
     model_path: str = ""
     imported_models: list[str] = field(default_factory=list)
     language: str = "en"
-    output_mode: str = "clipboard"
     hotkey: str = "ctrl+alt+space"
     hotkey_mode: str = "hold"
     microphone: str | None = None
@@ -41,7 +40,7 @@ def load_settings(path: Path | None = None) -> tuple[Settings, str]:
         defaults = Settings()
         allowed = {f.name for f in fields(Settings)}
         values = {k: v for k, v in raw.items() if k in allowed}
-        for key in ("model_root", "model_path", "language", "output_mode", "hotkey", "hotkey_mode"):
+        for key in ("model_root", "model_path", "language", "hotkey", "hotkey_mode"):
             if key in values and not isinstance(values[key], str):
                 raise ValueError(f"Invalid {key}")
         if not values.get("model_root", defaults.model_root).strip():
@@ -57,8 +56,6 @@ def load_settings(path: Path | None = None) -> tuple[Settings, str]:
         settings = Settings(**values)
         if settings.language not in ("en", "vi"):
             settings.language = defaults.language
-        if settings.output_mode not in ("clipboard", "type"):
-            settings.output_mode = defaults.output_mode
         if settings.hotkey_mode not in ("hold", "toggle"):
             settings.hotkey_mode = defaults.hotkey_mode
         return settings, ""

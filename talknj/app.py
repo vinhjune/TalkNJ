@@ -93,7 +93,6 @@ class Controller(QObject):
         self.window.record_requested.connect(self.record_clicked)
         self.window.copy_requested.connect(self.copy_transcript)
         self.window.preferences_changed.connect(self.preferences_changed)
-        self.window.hotkey_requested.connect(self.apply_hotkey)
         self.window.choose_hotkey_requested.connect(self.choose_hotkey)
         self.window.model_changed.connect(self.select_model)
         self.window.download_requested.connect(self.start_download)
@@ -113,11 +112,10 @@ class Controller(QObject):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.tray_activated)
         self.tray.show()
-        app_menu = self.window.menuBar().addMenu("App")
         self.quit_action = QAction("Quit TalkNJ", self.window)
         self.quit_action.setShortcut("Ctrl+Q")
         self.quit_action.triggered.connect(self.request_quit)
-        app_menu.addAction(self.quit_action)
+        self.window.addAction(self.quit_action)
         self.populate_preferences()
         self.refresh()
         self.register_hotkey(self.settings.hotkey)
@@ -155,12 +153,13 @@ class Controller(QObject):
             self.window.show_notice(f"Preferences could not be saved: {exc}")
 
     def populate_preferences(self):
-        for widget, value in ((self.window.language, self.settings.language),
-                              (self.window.output, self.settings.output_mode),
-                              (self.window.hotkey_mode, self.settings.hotkey_mode)):
-            widget.blockSignals(True)
-            widget.setCurrentIndex(max(0, widget.findData(value)))
-            widget.blockSignals(False)
+        self.window.language.blockSignals(True)
+        self.window.language.setCurrentIndex(max(0, self.window.language.findData(self.settings.language)))
+        self.window.language.blockSignals(False)
+        self.window.push_to_talk.blockSignals(True)
+        holding = self.settings.hotkey_mode == "hold"
+        self.window.push_to_talk.setChecked(holding)
+        self.window.push_to_talk.blockSignals(False)
         try:
             self.window.set_hotkey(self.settings.hotkey)
         except (TypeError, ValueError):
@@ -244,8 +243,7 @@ class Controller(QObject):
         if self.state != "idle":
             return
         self.settings.language = self.window.language.currentData() or "en"
-        self.settings.output_mode = self.window.output.currentData() or "clipboard"
-        self.settings.hotkey_mode = self.window.hotkey_mode.currentData() or "hold"
+        self.settings.hotkey_mode = "hold" if self.window.push_to_talk.isChecked() else "toggle"
         if self.window.microphone.currentIndex() >= 0:
             self.settings.microphone = (self.window.microphone.currentText()
                                         if self.window.microphone.currentData() is not None else None)
@@ -261,9 +259,6 @@ class Controller(QObject):
             shortcut = "a configured shortcut"
         self.window.capture_hint.setText(
             f"{gesture} {shortcut} anywhere, or use the recording button. Five-minute limit.")
-        self.window.delivery_hint.setText(
-            "Clipboard only · Nothing is typed automatically" if self.settings.output_mode == "clipboard"
-            else "Active app · Types into the original window and keeps a clipboard copy")
 
     def register_hotkey(self, chord):
         listener = None
@@ -271,9 +266,7 @@ class Controller(QObject):
             canonical = validate_hotkey(chord)
             listener = HotkeyListener(
                 canonical,
-                lambda: self.bridge.pressed.emit((
-                    listener, self._hotkey_epoch,
-                    foreground_window() if sys.platform != "darwin" or self.settings.output_mode == "type" else 0)),
+                lambda: self.bridge.pressed.emit((listener, self._hotkey_epoch, foreground_window())),
                 lambda: self.bridge.released.emit((listener, self._hotkey_epoch)),
             )
             # A candidate never fires while the OS is checking/installing it.
@@ -289,6 +282,7 @@ class Controller(QObject):
             retained = (f" {format_hotkey(self.listener.chord)} is still active."
                         if self.listener else " The recording button still works.")
             self.window.hotkey_status.setText(f"Shortcut unavailable: {exc}.{retained}{cleanup_warning}")
+            self.window.hotkey_status.show()
             self.window.show_notice(f"Global shortcut could not start: {exc}.{retained}{cleanup_warning}")
             return False
         old = self.listener
@@ -308,9 +302,8 @@ class Controller(QObject):
         quit_chord = "win+q" if sys.platform == "darwin" else "ctrl+q"
         self.quit_action.setShortcut("" if canonical == quit_chord else "Ctrl+Q")
         self.window.set_hotkey(canonical)
-        self.window.hotkey_status.setText(
-            f"Listening globally for {format_hotkey(canonical)}. Other apps may also respond to this chord."
-            + cleanup_warning)
+        self.window.hotkey_status.setText(cleanup_warning.strip())
+        self.window.hotkey_status.setVisible(bool(cleanup_warning))
         self.update_hints()
         return True
 
@@ -326,26 +319,17 @@ class Controller(QObject):
             listener.suspend()
         try:
             chord = self.window.capture_hotkey()
-            if chord:
-                self.window.set_hotkey(chord, pending=True)
-                self.window.hotkey_status.setText(
-                    f"Selected {format_hotkey(chord)}. Apply to activate and save; "
-                    "your previous shortcut remains unchanged until then.")
+            if chord and self.register_hotkey(chord):
+                self.window.show_notice("")
+                self.persist()
         except Exception as exc:
             self.window.show_notice(f"Could not choose a shortcut: {exc}")
         finally:
             self._hotkey_epoch += 1
-            if listener and not self.quitting:
+            if listener and listener is self.listener and not self.quitting:
                 listener.resume()
             self._choosing_hotkey = False
 
-    @Slot()
-    def apply_hotkey(self):
-        if self.state != "idle" or self.quitting or self._choosing_hotkey:
-            return
-        if self.register_hotkey(self.window.hotkey_chord):
-            self.window.show_notice("")
-            self.persist()
 
     @Slot(object)
     def hotkey_pressed(self, event):
@@ -396,8 +380,8 @@ class Controller(QObject):
     def start_recording(self, target):
         model = self.active_model()
         if not model:
-            self.window.show_notice("Download or select a model in Model library before recording.")
-            self.tray.showMessage("TalkNJ needs a model", "Open Model library and download a local speech model.")
+            self.window.show_notice("Download or select a model in Preferences before recording.")
+            self.tray.showMessage("TalkNJ needs a model", "Open Preferences and download a local speech model.")
             return
         if self.microphone_missing:
             self.window.show_notice("Select an available microphone in Preferences before recording.")
@@ -410,7 +394,7 @@ class Controller(QObject):
             self.tray.showMessage("Microphone unavailable", str(exc))
             return
         self.target = target
-        self.session = (Path(model.path), self.settings.language, self.settings.output_mode, target)
+        self.session = (Path(model.path), self.settings.language, target)
         self.started = time.monotonic()
         self.update_state("recording")
         self.timer.start()
@@ -437,12 +421,12 @@ class Controller(QObject):
         except Exception as exc:
             self.operation_failed(f"Recording failed: {exc}")
             return
-        model, language, mode, target = self.session
+        model, language, target = self.session
         self.update_state("transcribing")
         self.run_job(lambda: self.transcriber.transcribe(audio, model, language),
-                     lambda text: self.transcribed(text, mode, target), self.operation_failed)
+                     lambda text: self.transcribed(text, target), self.operation_failed)
 
-    def transcribed(self, text, mode, target):
+    def transcribed(self, text, target):
         if self.quitting:
             return
         if not text.strip():
@@ -454,15 +438,13 @@ class Controller(QObject):
 
         def deliver():
             copy_text(text)
-            if mode == "type" and target:
+            if target:
                 try:
                     type_text(target, text)
                 except Exception as exc:
                     return f"Text copied, but not fully typed: {exc} Recover the complete text from the clipboard."
                 return "Typed into the original application. A copy is also on the clipboard."
-            if mode == "type":
-                return "Preview recording: copied to clipboard. Use the global shortcut from another app for automatic typing."
-            return "Copied to clipboard. Nothing was typed into another application."
+            return "Preview recording: copied to clipboard. Use the global hotkey from another app for automatic typing."
 
         self.run_job(deliver, self.delivered, self.operation_failed)
 

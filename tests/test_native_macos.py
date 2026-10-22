@@ -342,11 +342,15 @@ def test_foreground_capture_is_exact_and_own_process_is_never_targeted(api):
     assert mac.foreground_window() == 0
 
 
-def test_accessibility_refusal_requests_permission_and_is_actionable(api):
+def test_accessibility_refusal_preserves_clipboard_and_reports_typing_refusal(api):
     api.ax.trusted = False
-    with pytest.raises(RuntimeError, match="Accessibility.*System Settings.*terminal/Python"):
-        mac.foreground_window()
+    target = mac.foreground_window()
     assert api.ax.requests == [{"prompt": True}]
+    mac.copy_text("Recoverable dictation")
+    with pytest.raises(RuntimeError, match="Accessibility.*System Settings.*terminal/Python"):
+        mac.type_text(target, "Recoverable dictation")
+    assert api.pasteboard.writes[0][0] == "Recoverable dictation"
+    assert api.quartz.posted == []
 
 
 def test_typing_still_requires_accessibility_for_a_previously_captured_target(api):
@@ -504,6 +508,9 @@ def test_keyboard_allocation_failures_do_not_silently_succeed(api):
     ("win+7", 26, "7", "win"),
     ("ctrl+space", 49, " ", "ctrl"),
     ("win+f12", 111, "", "win"),
+    ("alt+.", 47, ".", "alt"),
+    ("alt+,", 43, ",", "alt"),
+    ("ctrl+;", 41, ";", "ctrl"),
 ])
 def test_logical_hotkey_identity_and_autorepeat_are_independent_of_mac_keycodes(api, chord, code, characters, modifier):
     listener, notifications = api.listener_for(chord)
@@ -532,6 +539,29 @@ def test_trigger_before_modifiers_and_either_side_release_match_shared_state_mac
     api.quartz.down.remove(55)
     api.event(api.quartz.kCGEventFlagsChanged, 55, flags=0)
     assert notifications == ["press", "release"]
+
+
+def test_modifier_only_chord_uses_flags_and_waits_for_final_modifier_side(api):
+    listener, notifications = api.listener_for("ctrl+win")
+    q = api.quartz
+    control, command = q.kCGEventFlagMaskControl, q.kCGEventFlagMaskCommand
+    q.down.add(59)
+    api.event(q.kCGEventFlagsChanged, 59, flags=control)
+    assert notifications == []
+    q.down.add(55)
+    api.event(q.kCGEventFlagsChanged, 55, flags=control | command)
+    api.event(q.kCGEventFlagsChanged, 55, flags=control | command)
+    q.down.add(62)
+    api.event(q.kCGEventFlagsChanged, 62, flags=control | command)
+    q.down.remove(59)
+    api.event(q.kCGEventFlagsChanged, 59, flags=control | command)
+    assert notifications == ["press"]
+    q.down.remove(62)
+    api.event(q.kCGEventFlagsChanged, 62, flags=command)
+    q.down.remove(55)
+    api.event(q.kCGEventFlagsChanged, 55, flags=0)
+    assert notifications == ["press", "release"]
+    assert listener._error is None
 
 
 def test_lost_keyup_recovers_release_without_synthesizing_new_press(api):

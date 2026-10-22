@@ -45,7 +45,7 @@ def test_missing_device_requires_explicit_reselection_even_after_other_preferenc
     current.refresh()
     assert current.microphone_missing
     assert current.window.microphone.currentIndex() == -1
-    current.window.output.setCurrentIndex(current.window.output.findData("type"))
+    current.window.push_to_talk.click()
     assert current.microphone_missing
     assert current.settings.microphone == "Chosen mic [WASAPI]"
     current.window.microphone.setCurrentIndex(0)

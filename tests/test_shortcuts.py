@@ -116,6 +116,51 @@ def test_keys_capture_friendly_chord_and_require_full_release(application):
     parent.close()
 
 
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_modifier_only_capture_requires_two_distinct_modifiers_and_full_release(
+    application, monkeypatch, platform,
+):
+    monkeypatch.setattr(ui, "sys", SimpleNamespace(platform=platform))
+    parent = MainWindow()
+    dialog = ShortcutDialog(parent)
+    send_key(dialog, Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier)
+    assert not dialog.chord
+    send_key(dialog, Qt.Key.Key_Meta,
+             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+    assert dialog.chord == "ctrl+win"
+    assert not dialog.use_shortcut.isEnabled()
+    send_key(dialog, Qt.Key.Key_Meta, release=True)
+    assert not dialog.use_shortcut.isEnabled()
+    send_key(dialog, Qt.Key.Key_Control, release=True)
+    assert dialog.use_shortcut.isEnabled()
+    dialog.use_shortcut.click()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    parent.close()
+
+
+@pytest.mark.parametrize("key, virtual_key, expected", [
+    (Qt.Key.Key_Period, 0, "alt+."),
+    (Qt.Key.Key_Comma, 0xBE, "alt+."),  # The hook follows the Windows OEM key, not Qt text.
+    (Qt.Key.Key_Comma, 0, "alt+,"),
+    (Qt.Key.Key_Slash, 0, "alt+/"),
+])
+def test_punctuation_capture_matches_native_identity(application, key, virtual_key, expected):
+    parent = MainWindow()
+    dialog = ShortcutDialog(parent)
+    send_key(dialog, Qt.Key.Key_Alt, Qt.KeyboardModifier.AltModifier)
+    press = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.AltModifier,
+                      0, virtual_key, 0)
+    release = QKeyEvent(QEvent.Type.KeyRelease, key, Qt.KeyboardModifier.AltModifier,
+                        0, virtual_key, 0)
+    assert dialog.eventFilter(dialog, press)
+    assert dialog.chord == expected
+    assert dialog.eventFilter(dialog, release)
+    assert not dialog.use_shortcut.isEnabled()
+    send_key(dialog, Qt.Key.Key_Alt, release=True)
+    assert dialog.use_shortcut.isEnabled()
+    parent.close()
+
+
 def test_native_virtual_key_matches_global_hook_on_non_us_layout(application):
     parent = MainWindow()
     dialog = ShortcutDialog(parent)
@@ -133,6 +178,7 @@ def test_native_virtual_key_matches_global_hook_on_non_us_layout(application):
     (Qt.Key.Key_F2, 0x78, Qt.KeyboardModifier.AltModifier, "alt+f2"),
     (Qt.Key.Key_A, 0x00, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
      "shift+win+a"),
+    (Qt.Key.Key_Period, 47, Qt.KeyboardModifier.AltModifier, "alt+."),
 ])
 def test_macos_capture_uses_logical_keys_and_command_modifier(
     application, monkeypatch, key, native_code, modifiers, expected,
@@ -244,24 +290,22 @@ def test_macos_capture_rejects_shifted_punctuation_instead_of_using_hardware_dig
     assert dialog.eventFilter(dialog, release)
     assert not dialog.chord
     assert not dialog.use_shortcut.isEnabled()
-    assert "letter, number, Space or F1–F12" in dialog.feedback.text()
     parent.close()
 
 
-@pytest.mark.parametrize("key, modifiers, message", [
-    (Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier, "Modifiers alone"),
-    (Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "at least one"),
-    (Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier, "F1–F12"),
-    (Qt.Key.Key_AltGr, Qt.KeyboardModifier.GroupSwitchModifier, "AltGr"),
+@pytest.mark.parametrize("key, modifiers", [
+    (Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier),
+    (Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier),
+    (Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier),
+    (Qt.Key.Key_AltGr, Qt.KeyboardModifier.GroupSwitchModifier),
 ])
-def test_invalid_choices_are_explained_after_release(application, key, modifiers, message):
+def test_invalid_choices_are_not_accepted_after_release(application, key, modifiers):
     parent = MainWindow()
     dialog = ShortcutDialog(parent)
     send_key(dialog, key, modifiers)
     send_key(dialog, key, release=True)
     assert not dialog.chord
     assert not dialog.use_shortcut.isEnabled()
-    assert message in dialog.feedback.text()
     parent.close()
 
 
@@ -271,7 +315,6 @@ def test_multiple_trigger_keys_rejected_and_new_gesture_can_recover(application)
     send_key(dialog, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
     send_key(dialog, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
     assert not dialog.chord
-    assert "exactly one" in dialog.feedback.text()
     send_key(dialog, Qt.Key.Key_A, release=True)
     send_key(dialog, Qt.Key.Key_B, release=True)
     enter_ctrl_space(dialog)
@@ -337,11 +380,10 @@ def test_capture_suspends_bound_chord_and_invalidates_queued_events(controller, 
     monkeypatch.setattr(controller.window, "capture_hotkey", capture)
     controller.choose_hotkey()
     controller.start_recording.assert_not_called()
-    assert not original.suspended
-    assert controller.listener is original
-    assert controller.settings.hotkey == "ctrl+alt+space"
-    assert controller.window.hotkey_chord == "ctrl+space"
-    assert controller.window.apply_hotkey.isEnabled()
+    assert original.stopped
+    assert controller.listener is not original
+    assert controller.settings.hotkey == "ctrl+space"
+    assert load_settings()[0].hotkey == "ctrl+space"
     controller.hotkey_pressed((original, epoch, 0xBEEF))
     controller.start_recording.assert_not_called()
 
@@ -352,7 +394,6 @@ def test_cancel_restores_listener_and_preserves_previous_selection(controller, m
     controller.choose_hotkey()
     assert not original.suspended
     assert controller.window.hotkey_chord == "ctrl+alt+space"
-    assert not controller.window.apply_hotkey.isEnabled()
     assert controller.settings.hotkey == "ctrl+alt+space"
 
 
@@ -368,16 +409,16 @@ def test_dialog_failure_resumes_previous_listener(controller, monkeypatch):
 def test_failed_registration_retains_working_shortcut_and_saved_preferences(controller, monkeypatch):
     controller.persist()
     original = controller.listener
-    controller.window.set_hotkey("ctrl+space", pending=True)
+    monkeypatch.setattr(controller.window, "capture_hotkey", lambda: "ctrl+space")
     monkeypatch.setattr(FakeListener, "fail_start", True)
-    controller.apply_hotkey()
+    controller.choose_hotkey()
     assert controller.listener is original
     assert not original.stopped
     assert not original.suspended
     assert FakeListener.instances[-1].stopped
     assert controller.settings.hotkey == "ctrl+alt+space"
     assert load_settings()[0].hotkey == "ctrl+alt+space"
-    assert controller.window.apply_hotkey.isEnabled()
+    assert controller.window.hotkey_chord == "ctrl+alt+space"
     assert "still active" in controller.window.hotkey_status.text()
     assert "Windows reserved" in controller.window.notice.text()
     controller.start_recording = Mock()
@@ -385,24 +426,24 @@ def test_failed_registration_retains_working_shortcut_and_saved_preferences(cont
     controller.start_recording.assert_called_once_with(0xBEEF)
 
 
-def test_successful_replacement_saves_and_reloads_without_stale_release(controller):
+@pytest.mark.parametrize("chord", ["ctrl+shift+f2", "ctrl+win", "alt+."])
+def test_successful_replacement_saves_and_reloads_without_stale_release(controller, monkeypatch, chord):
     original = controller.listener
     controller.stop_recording = Mock()
-    controller.window.set_hotkey("ctrl+shift+f2", pending=True)
-    controller.apply_hotkey()
+    monkeypatch.setattr(controller.window, "capture_hotkey", lambda: chord)
+    controller.choose_hotkey()
     assert original.stopped
     assert controller.listener is not original
-    assert controller.settings.hotkey == "ctrl+shift+f2"
-    assert load_settings()[0].hotkey == "ctrl+shift+f2"
-    assert not controller.window.apply_hotkey.isEnabled()
+    assert controller.settings.hotkey == chord
+    assert load_settings()[0].hotkey == chord
     controller.stop_recording.assert_not_called()
     assert controller.register_hotkey(load_settings()[0].hotkey)
-    assert controller.listener.chord == "ctrl+shift+f2"
+    assert controller.listener.chord == chord
 
 
 @pytest.mark.parametrize("mode", ["hold", "toggle"])
 def test_global_callbacks_target_foreground_application_in_both_modes(controller, mode):
-    controller.settings.hotkey_mode = mode
+    controller.window.push_to_talk.setChecked(mode == "hold")
     starts, stops = [], []
 
     def start(target):
@@ -426,23 +467,6 @@ def test_global_callbacks_target_foreground_application_in_both_modes(controller
     assert controller.state == "idle"
 
 
-def test_macos_clipboard_shortcut_records_without_accessibility(controller, monkeypatch, tmp_path):
-    model = InstalledModel(tmp_path / "english", "English", ("en",))
-    controller.models_scanned(controller._scan_epoch, [model])
-    monkeypatch.setattr(desktop, "sys", SimpleNamespace(platform="darwin"))
-
-    def denied_target_capture():
-        raise RuntimeError("Accessibility permission is denied")
-
-    monkeypatch.setattr(desktop, "foreground_window", denied_target_capture)
-    monkeypatch.setattr(controller, "recorder", Mock(level=0, error=None, limit_reached=False))
-    try:
-        controller.listener.on_press()
-        assert controller.state == "recording"
-    finally:
-        controller.timer.stop()
-        controller.recorder.cancel()
-        controller.update_state("idle")
 
 
 def test_release_does_not_stop_button_started_recording_or_replaced_listener(controller):
@@ -462,7 +486,7 @@ def test_unsupported_persisted_chord_does_not_crash_preferences(controller):
 
 
 def test_mode_change_is_persisted_with_shortcut(controller):
-    controller.window.hotkey_mode.setCurrentIndex(controller.window.hotkey_mode.findData("toggle"))
+    controller.window.push_to_talk.click()
     saved, warning = load_settings()
     assert not warning
     assert saved.hotkey_mode == "toggle"
@@ -707,3 +731,39 @@ def test_main_rejects_other_platforms_before_creating_qt(monkeypatch, capsys, pl
     app_factory.assert_not_called()
     assert "Windows or macOS" in capsys.readouterr().err
 
+
+
+@pytest.mark.parametrize("target, failure", [(0xBEEF, False), (0xBEEF, True), (0, False)])
+def test_delivery_keeps_clipboard_before_typing_and_recovers_on_refusal(
+    controller, monkeypatch, target, failure,
+):
+    text = "Xin chào, thế giới!"
+    copied, typed = [], []
+    monkeypatch.setattr(desktop, "copy_text", copied.append)
+
+    def type_into_app(window, transcript):
+        assert copied == [text]
+        typed.append((window, transcript))
+        if failure:
+            raise RuntimeError("Foreground changed")
+
+    monkeypatch.setattr(desktop, "type_text", type_into_app)
+    monkeypatch.setattr(controller, "run_job", lambda function, result, failed: result(function()))
+    controller.transcribed(text, target)
+    assert copied == [text]
+    assert typed == ([(target, text)] if target else [])
+    assert controller.window.transcript.toPlainText() == text
+    assert controller.state == "idle"
+    if failure:
+        assert "Foreground changed" in controller.window.notice.text()
+
+
+def test_silent_recording_leaves_clipboard_and_target_untouched(controller, monkeypatch):
+    copy = Mock()
+    type_into_app = Mock()
+    monkeypatch.setattr(desktop, "copy_text", copy)
+    monkeypatch.setattr(desktop, "type_text", type_into_app)
+    controller.transcribed("  ", 0xBEEF)
+    copy.assert_not_called()
+    type_into_app.assert_not_called()
+    assert controller.state == "idle"

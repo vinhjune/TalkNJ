@@ -23,6 +23,8 @@ class HotkeyValidationTests(unittest.TestCase):
         self.assertEqual(native.validate_hotkey("win+f12+shift+ctrl"), "ctrl+shift+win+f12")
         self.assertEqual(native.validate_hotkey("Alt+7"), "alt+7")
         self.assertEqual(native.validate_hotkey("SHIFT+Z"), "shift+z")
+        self.assertEqual(native.validate_hotkey("WIN + CTRL"), "ctrl+win")
+        self.assertEqual(native.validate_hotkey(". + ALT"), "alt+.")
 
     def test_friendly_shortcut_display(self) -> None:
         self.assertEqual(native.format_hotkey("ctrl+alt+space"), "Ctrl + Alt + Space")
@@ -37,7 +39,7 @@ class HotkeyValidationTests(unittest.TestCase):
 
     def test_rejects_ambiguous_unsupported_and_incomplete_chords(self) -> None:
         invalid = [
-            "", " ", "+", "ctrl", "a", "ctrl+alt", "ctrl+a+b", "ctrl++a",
+            "", " ", "+", "ctrl", "alt", "shift", "win", "a", "ctrl+a+b", "ctrl++a",
             "ctrl+ctrl+a", "CTRL+ctrl+a", "ctrl+a+a", "control+a", "meta+a",
             "ctrl+enter", "ctrl+f0", "ctrl+f13", "ctrl+é", "ctrl+ab",
             "ctrl+space+", "ctrl+num1", "ctrl+1.0",
@@ -117,6 +119,16 @@ class ChordStateTests(unittest.TestCase):
         self.assertEqual(state.update({0xA1, 0x32}), 1)
         self.assertEqual(state.reset(), -1)
         self.assertEqual(state.reset(), 0)
+
+    def test_modifier_only_chord_waits_for_both_groups_and_last_physical_side(self) -> None:
+        state = native._ChordState("ctrl+win")
+        self.assertEqual(state.update({0x5C}), 0)
+        self.assertEqual(state.update({0xA2, 0x5C}), 1)
+        self.assertEqual(state.update({0xA2, 0xA3, 0x5C}), 0)
+        self.assertEqual(state.update({0xA3, 0x5C}), 0)
+        self.assertEqual(state.update({0x5C}, allow_press=False), -1)
+        self.assertEqual(state.update({0xA3, 0x5C}, allow_press=False), 0)
+        self.assertEqual(state.update({0xA3, 0x5C}), 1)
 
     def test_generic_modifier_event_normalization(self) -> None:
         cases = [(0x10, 0x2A, 0, 0xA0), (0x10, 0x36, 0, 0xA1),
@@ -541,7 +553,8 @@ class _HookAPI:
 
 
 class HookBehaviorTests(unittest.TestCase):
-    def run_hook(self, events: list[tuple], *, fail_press: bool = False) -> tuple[list[str], _HookAPI, native.HotkeyListener]:
+    def run_hook(self, events: list[tuple], *, fail_press: bool = False,
+                 chord: str = "ctrl+alt+space") -> tuple[list[str], _HookAPI, native.HotkeyListener]:
         api = _HookAPI(events)
         notifications: list[str] = []
 
@@ -550,7 +563,7 @@ class HookBehaviorTests(unittest.TestCase):
             if fail_press:
                 raise ValueError("consumer callback failed")
 
-        listener = native.HotkeyListener("ctrl+alt+space", press, lambda: notifications.append("release"))
+        listener = native.HotkeyListener(chord, press, lambda: notifications.append("release"))
         # These tests exercise the real hook callback and message-loop logic,
         # replacing only the OS boundary, including the ctypes callback thunk.
         with patch.object(native, "_get_api", return_value=api), patch.object(native, "_HOOKPROC", lambda callback: callback):
@@ -578,6 +591,21 @@ class HookBehaviorTests(unittest.TestCase):
         self.assertEqual(api.probed, [(0x4003, 0x20)])
         self.assertEqual(api.unregistered, [1])
         self.assertIsNone(listener._error)
+
+    def test_modifier_only_and_punctuation_chords_fire_and_forward_real_hook_events(self) -> None:
+        for chord, modifier, trigger in (("ctrl+win", 0xA2, 0x5B), ("alt+.", 0xA4, 0xBE)):
+            with self.subTest(chord=chord):
+                events = [
+                    ("key", modifier, True, 0, True),
+                    ("key", trigger, True, 0, True),
+                    ("key", trigger, True, 0, True),
+                    ("key", trigger, False, 0, True),
+                    ("key", modifier, False, 0, True),
+                ]
+                notifications, api, listener = self.run_hook(events, chord=chord)
+                self.assertEqual(notifications, ["press", "release"])
+                self.assertEqual(api.results, [99] * len(events))
+                self.assertIsNone(listener._error)
 
     def test_lost_modifier_release_is_recovered_by_poll(self) -> None:
         events = [

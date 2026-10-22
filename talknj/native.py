@@ -93,7 +93,11 @@ _MODIFIERS = {
     "win": (0x5B, 0x5C),
 }
 _MODIFIER_VKS = tuple(vk for group in _MODIFIERS.values() for vk in group)
-_KEY_VKS = {"space": 0x20}
+_KEY_VKS = {
+    "space": 0x20, ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD,
+    ".": 0xBE, "/": 0xBF, "`": 0xC0, "[": 0xDB, "\\": 0xDC,
+    "]": 0xDD, "'": 0xDE,
+}
 _KEY_VKS.update({chr(code).lower(): code for code in range(0x41, 0x5B)})
 _KEY_VKS.update({str(number): 0x30 + number for number in range(10)})
 _KEY_VKS.update({f"f{number}": 0x6F + number for number in range(1, 13)})
@@ -114,10 +118,12 @@ def validate_hotkey(chord: str) -> str:
         raise ValueError("A hotkey cannot contain empty or repeated members.")
     modifiers = [token for token in tokens if token in _MODIFIERS]
     keys = [token for token in tokens if token not in _MODIFIERS]
-    if not modifiers or len(keys) != 1 or keys[0] not in _KEY_VKS:
+    if not modifiers or not (
+        len(keys) == 1 and keys[0] in _KEY_VKS or not keys and len(modifiers) >= 2
+    ):
         raise ValueError(
-            "Choose at least one of ctrl, alt, shift, win and exactly one letter, "
-            "number, space, or F1–F12 key."
+            "Choose two or more different modifiers, or a modifier plus one letter, "
+            "number, punctuation, Space or F1–F12 key."
         )
     return "+".join([name for name in _MODIFIERS if name in modifiers] + keys)
 
@@ -336,13 +342,14 @@ class _ChordState:
 
     def __init__(self, chord: str) -> None:
         tokens = validate_hotkey(chord).split("+")
-        self.key = _KEY_VKS[tokens[-1]]
-        self.groups = tuple(_MODIFIERS[token] for token in tokens[:-1])
-        self.watched = tuple(dict.fromkeys((self.key, *_MODIFIER_VKS)))
+        self.key = _KEY_VKS.get(tokens[-1])
+        self.groups = tuple(_MODIFIERS[token] for token in tokens if token in _MODIFIERS)
+        self.watched = (self.key, *_MODIFIER_VKS) if self.key is not None else _MODIFIER_VKS
         self.active = False
 
     def matches(self, down: Collection[int]) -> bool:
-        return self.key in down and all(any(vk in down for vk in group) for group in self.groups)
+        return (self.key is None or self.key in down) and all(
+            any(vk in down for vk in group) for group in self.groups)
 
     def update(self, down: Collection[int], *, allow_press: bool = True) -> int:
         matches = self.matches(down)
@@ -480,19 +487,20 @@ class HotkeyListener:
             self._thread_id = int(api.GetCurrentThreadId())
             message = _MSG()
             api.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
-            # Probe the Windows reservation table before replacing a working
-            # listener. The hook remains non-suppressing; this reservation is
-            # immediately released and cannot detect other apps' local shortcuts.
-            tokens = self.chord.split("+")
-            flags = {"alt": 0x0001, "ctrl": 0x0002, "shift": 0x0004, "win": 0x0008}
-            modifiers = 0x4000 | sum(flags[token] for token in tokens[:-1])
-            if not api.RegisterHotKey(None, 1, modifiers, _KEY_VKS[tokens[-1]]):
-                raise _native_error(
-                    f"{format_hotkey(self.chord)} is unavailable. Windows may reserve it, "
-                    "or another app has registered it. Choose a different shortcut."
-                )
-            if not api.UnregisterHotKey(None, 1):
-                raise _native_error("Cannot release the temporary shortcut availability check.")
+            # Probe ordinary chords before replacing a working listener. The
+            # reservation API cannot represent a side-independent modifier-only
+            # gesture; those use the passive hook without an availability probe.
+            if self._state.key is not None:
+                tokens = self.chord.split("+")
+                flags = {"alt": 0x0001, "ctrl": 0x0002, "shift": 0x0004, "win": 0x0008}
+                modifiers = 0x4000 | sum(flags[token] for token in tokens[:-1])
+                if not api.RegisterHotKey(None, 1, modifiers, self._state.key):
+                    raise _native_error(
+                        f"{format_hotkey(self.chord)} is unavailable. Windows may reserve it, "
+                        "or another app has registered it. Choose a different shortcut."
+                    )
+                if not api.UnregisterHotKey(None, 1):
+                    raise _native_error("Cannot release the temporary shortcut availability check.")
 
             def callback(code: int, wparam: int, lparam: int) -> int:
                 try:
