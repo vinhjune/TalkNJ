@@ -11,14 +11,14 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessageBox, QSystemTrayIcon
 
-from talknj.audio import AudioRecorder, MAX_SECONDS, list_input_devices
+from talknj.audio import AudioRecorder, list_input_devices
 from talknj.models import CATALOG, discover_models, download_model, validate_model
 from talknj.native import (
     HotkeyListener, copy_text, foreground_window, format_hotkey, type_text, validate_hotkey,
 )
 from talknj.settings import data_directory, load_settings, save_settings
 from talknj.transcription import Transcriber
-from talknj.ui import MainWindow, app_icon
+from talknj.ui import MainWindow, app_icon, countdown_text
 
 
 class JobSignals(QObject):
@@ -198,7 +198,7 @@ class Controller(QObject):
     def refresh_microphones(self):
         self.window.microphone.blockSignals(True)
         self.window.microphone.clear()
-        self.window.microphone.addItem("Windows default microphone", None)
+        self.window.microphone.addItem("System default microphone", None)
         try:
             for device, name in list_input_devices():
                 self.window.microphone.addItem(name, device)
@@ -271,10 +271,12 @@ class Controller(QObject):
             canonical = validate_hotkey(chord)
             listener = HotkeyListener(
                 canonical,
-                lambda: self.bridge.pressed.emit((listener, self._hotkey_epoch, foreground_window())),
+                lambda: self.bridge.pressed.emit((
+                    listener, self._hotkey_epoch,
+                    foreground_window() if sys.platform != "darwin" or self.settings.output_mode == "type" else 0)),
                 lambda: self.bridge.released.emit((listener, self._hotkey_epoch)),
             )
-            # A candidate never fires while Windows is checking/installing it.
+            # A candidate never fires while the OS is checking/installing it.
             listener.suspend()
             listener.start()
         except Exception as exc:
@@ -303,7 +305,8 @@ class Controller(QObject):
                 cleanup_warning = f" Previous listener cleanup reported: {exc}"
         listener.resume()
         self.settings.hotkey = canonical
-        self.quit_action.setShortcut("" if canonical == "ctrl+q" else "Ctrl+Q")
+        quit_chord = "win+q" if sys.platform == "darwin" else "ctrl+q"
+        self.quit_action.setShortcut("" if canonical == quit_chord else "Ctrl+Q")
         self.window.set_hotkey(canonical)
         self.window.hotkey_status.setText(
             f"Listening globally for {format_hotkey(canonical)}. Other apps may also respond to this chord."
@@ -379,12 +382,15 @@ class Controller(QObject):
         self.state = state
         self.window.set_busy(state, self.active_model() is not None)
         self.tray.setToolTip(f"TalkNJ · {state.capitalize()} · {self.window.hotkey.text()}")
+        if state == "recording":
+            self.update_countdown()
         if state == "idle":
             self.indicator.hide()
         elif not self.window.isActiveWindow():
             screen = self.application.primaryScreen().availableGeometry()
             self.indicator.move(screen.center().x() - 165, screen.bottom() - 90)
-            self.indicator.setText("Listening…" if state == "recording" else f"{state.capitalize()} locally…")
+            if state != "recording":
+                self.indicator.setText(f"{state.capitalize()} locally…")
             self.indicator.show()
 
     def start_recording(self, target):
@@ -406,18 +412,20 @@ class Controller(QObject):
         self.target = target
         self.session = (Path(model.path), self.settings.language, self.settings.output_mode, target)
         self.started = time.monotonic()
-        self.window.elapsed.setText("00:00 / 05:00")
         self.update_state("recording")
         self.timer.start()
+
+    def update_countdown(self):
+        remaining = countdown_text(time.monotonic() - self.started)
+        self.window.elapsed.setText(f"{remaining} remaining")
+        self.indicator.setText(f"Listening · {remaining} remaining")
 
     @Slot()
     def tick(self):
         if self.state != "recording":
             return
-        seconds = min(int(time.monotonic() - self.started), MAX_SECONDS)
-        self.window.elapsed.setText(f"{seconds // 60:02d}:{seconds % 60:02d} / 05:00")
+        self.update_countdown()
         self.window.level.setValue(int(self.recorder.level * 100))
-        self.indicator.setText(f"Listening · {seconds // 60:02d}:{seconds % 60:02d}")
         if self.recorder.error or self.recorder.limit_reached:
             self.stop_recording()
 
@@ -621,8 +629,8 @@ class Controller(QObject):
 
 
 def main() -> int:
-    if sys.platform != "win32":
-        print("TalkNJ requires Windows 10/11 x64.", file=sys.stderr)
+    if sys.platform not in ("win32", "darwin"):
+        print("TalkNJ requires Windows or macOS.", file=sys.stderr)
         return 1
     application = QApplication(sys.argv)
     application.setApplicationName("TalkNJ")
@@ -633,7 +641,7 @@ def main() -> int:
     lock = QLockFile(str(data_directory() / "instance.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):
-        QMessageBox.information(None, "TalkNJ is already running", "Open TalkNJ using its system-tray icon.")
+        QMessageBox.information(None, "TalkNJ is already running", "Open TalkNJ using its tray or menu-bar icon.")
         return 0
     controller = Controller(application)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from threading import Lock
 
 import av
@@ -12,6 +13,11 @@ import sounddevice as sd
 SAMPLE_RATE = 16000
 MAX_SECONDS = 300
 _MAX_DEVICE_RATE = 192000
+_MICROPHONE_PERMISSIONS = (
+    "macOS System Settings > Privacy & Security > Microphone"
+    if sys.platform == "darwin" else
+    "Windows Settings > Privacy & security > Microphone (including desktop apps)"
+)
 
 
 def list_input_devices() -> list[tuple[int, str]]:
@@ -25,8 +31,8 @@ def list_input_devices() -> list[tuple[int, str]]:
             if device["max_input_channels"] > 0
         ]
     except (sd.PortAudioError, OSError) as exc:
-        raise RuntimeError("Cannot enumerate microphones. Check Windows microphone privacy "
-                           f"permissions and your audio drivers: {exc}") from exc
+        raise RuntimeError("Cannot enumerate microphones. Check microphone privacy permissions in "
+                           f"{_MICROPHONE_PERMISSIONS} and your audio drivers: {exc}") from exc
 
 
 class AudioRecorder:
@@ -111,8 +117,8 @@ class AudioRecorder:
                     except Exception as close_exc:
                         cleanup_error = str(close_exc)
                 self._stream = None
-                message = ("Cannot start microphone recording. Check the selected device, Windows "
-                           "Settings > Privacy & security > Microphone (including desktop apps), "
+                message = ("Cannot start microphone recording. Check the selected device, "
+                           f"{_MICROPHONE_PERMISSIONS}, "
                            f"and whether another application is using it exclusively: {exc}")
                 if cleanup_error:
                     message += f" Closing the failed audio stream also failed: {cleanup_error}"
@@ -151,7 +157,7 @@ class AudioRecorder:
             self._level = 0.0
             if not self._stopping and not self._limit_reached and self._error is None:
                 self._error = ("The microphone stopped unexpectedly. Check the device connection "
-                               "and Windows microphone permissions, then record again.")
+                               "and microphone permissions, then record again.")
 
     def _close_stream(self, *, discard: bool) -> str | None:
         stream = self._stream

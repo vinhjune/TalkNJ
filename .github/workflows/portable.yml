@@ -1,0 +1,49 @@
+name: Native portable builds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            architecture: x64
+            target: windows-x64
+          - runner: macos-15
+            architecture: arm64
+            target: macos-arm64
+          - runner: macos-15-intel
+            architecture: x64
+            target: macos-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: ${{ matrix.architecture }}
+      - name: Install pinned native dependencies
+        run: python -m pip install -e ".[dev]"
+        env:
+          CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_METAL=OFF -DWHISPER_COREML=OFF -DBUILD_SHARED_LIBS=OFF
+      - name: Check affected contracts
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Lint
+        run: python -m ruff check talknj tests launch.py build_portable.py smoke_portable.py
+      - name: Build native bundle and archive
+        run: python build_portable.py
+      - name: Smoke frozen runtime without speech models
+        run: python smoke_portable.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TalkNJ-${{ matrix.target }}
+          path: dist/TalkNJ-${{ matrix.target }}.zip
+          if-no-files-found: error

@@ -1,9 +1,9 @@
-"""Windows clipboard, foreground-safe Unicode input, and non-suppressing hotkeys.
+"""Foreground-safe text delivery and passive Windows/macOS global hotkeys.
 
-SendInput cannot atomically bind input to an HWND. Insertion therefore checks the
-original foreground window before every Unicode scalar, but a desktop focus race
-between that check and delivery remains unavoidable. No function activates a window.
-Hotkey callbacks execute on the hook thread and must return promptly.
+The Windows implementation and its private OS boundary remain in this module.
+Darwin delegates to lazy PyObjC integration below. Neither platform activates
+windows or suppresses ordinary keyboard events; focus can still change between
+the final foreground check and OS event delivery.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable, Collection
@@ -123,7 +124,7 @@ def validate_hotkey(chord: str) -> str:
 
 def format_hotkey(chord: str) -> str:
     """Present a canonical chord without exposing its storage grammar."""
-    names = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win", "space": "Space"}
+    names = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Cmd" if sys.platform == "darwin" else "Win", "space": "Space"}
     return " + ".join(names.get(token, token.upper()) for token in validate_hotkey(chord).split("+"))
 
 
@@ -553,3 +554,7 @@ class HotkeyListener:
                 self._error = self._error or exc
                 _LOG.exception("Global hotkey release callback failed during shutdown")
             self._ready.set()
+
+
+if sys.platform == "darwin":
+    from talknj._native_macos import HotkeyListener, copy_text, foreground_window, type_text

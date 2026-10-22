@@ -1,9 +1,11 @@
 """Shortcut selection and controller behavior without real global hooks or audio."""
 
 import os
+import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QEvent, Qt, QTimer
@@ -12,6 +14,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from talknj import app as desktop
+from talknj import settings, ui
+from talknj.audio import MAX_SECONDS
+from talknj.models import InstalledModel
 from talknj.settings import load_settings
 from talknj.ui import MainWindow, ShortcutDialog
 
@@ -51,7 +56,10 @@ class FakeListener:
 
 
 @pytest.fixture
-def application():
+def application(monkeypatch):
+    # Existing shortcut cases describe Windows identities; Darwin cases override
+    # only this module's platform view, not the interpreter's global sys.platform.
+    monkeypatch.setattr(ui, "sys", SimpleNamespace(platform="win32"))
     current = QApplication.instance() or QApplication([])
     current.setQuitOnLastWindowClosed(False)
     return current
@@ -60,6 +68,8 @@ def application():
 @pytest.fixture
 def controller(application, tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(settings, "data_directory", lambda: tmp_path / "TalkNJ")
+    monkeypatch.setattr(desktop, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(FakeListener, "instances", [])
     monkeypatch.setattr(FakeListener, "fail_start", False)
     monkeypatch.setattr(desktop, "HotkeyListener", FakeListener)
@@ -113,6 +123,128 @@ def test_native_virtual_key_matches_global_hook_on_non_us_layout(application):
         QEvent.Type.KeyPress, Qt.Key.Key_Q, Qt.KeyboardModifier.ControlModifier, 0, 0x41, 0)
     assert dialog.eventFilter(dialog, event)
     assert dialog.chord == "ctrl+a"
+    parent.close()
+
+
+@pytest.mark.parametrize("key, native_code, modifiers, expected", [
+    (Qt.Key.Key_A, 0x00, Qt.KeyboardModifier.ControlModifier, "win+a"),
+    (Qt.Key.Key_Q, 0x41, Qt.KeyboardModifier.MetaModifier, "ctrl+q"),
+    (Qt.Key.Key_Space, 0x31, Qt.KeyboardModifier.ControlModifier, "win+space"),
+    (Qt.Key.Key_F2, 0x78, Qt.KeyboardModifier.AltModifier, "alt+f2"),
+    (Qt.Key.Key_A, 0x00, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+     "shift+win+a"),
+])
+def test_macos_capture_uses_logical_keys_and_command_modifier(
+    application, monkeypatch, key, native_code, modifiers, expected,
+):
+    monkeypatch.setattr(ui, "sys", SimpleNamespace(platform="darwin"))
+    parent = MainWindow()
+    dialog = ShortcutDialog(parent)
+    press = QKeyEvent(QEvent.Type.KeyPress, key, modifiers, native_code, native_code, 0)
+    release = QKeyEvent(QEvent.Type.KeyRelease, key, Qt.KeyboardModifier.NoModifier,
+                        native_code, native_code, 0)
+    assert dialog.eventFilter(dialog, press)
+    assert dialog.chord == expected
+    assert not dialog.use_shortcut.isEnabled()
+    assert dialog.eventFilter(dialog, release)
+    assert dialog.use_shortcut.isEnabled()
+    parent.close()
+
+
+@pytest.mark.parametrize("modifier, mask, first_side, last_side, expected", [
+    (Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier, 55, 54, "win+space"),
+    (Qt.Key.Key_Meta, Qt.KeyboardModifier.MetaModifier, 59, 62, "ctrl+space"),
+    (Qt.Key.Key_Alt, Qt.KeyboardModifier.AltModifier, 58, 61, "alt+space"),
+])
+def test_macos_cross_side_modifier_release_allows_confirming_shortcut(
+    application, monkeypatch, modifier, mask, first_side, last_side, expected,
+):
+    monkeypatch.setattr(ui, "sys", SimpleNamespace(platform="darwin"))
+    parent = MainWindow()
+    dialog = ShortcutDialog(parent)
+    try:
+        # Cocoa reports aggregate modifier transitions: a press on one side can
+        # finish with a release from the other, without intermediate events.
+        for kind, key, modifiers, code in (
+            (QEvent.Type.KeyPress, modifier, mask, first_side),
+            (QEvent.Type.KeyPress, Qt.Key.Key_Space, mask, 49),
+            (QEvent.Type.KeyRelease, Qt.Key.Key_Space, mask, 49),
+        ):
+            assert dialog.eventFilter(dialog, QKeyEvent(kind, key, modifiers, code, code, 0))
+        assert not dialog.use_shortcut.isEnabled()
+        assert dialog.eventFilter(dialog, QKeyEvent(
+            QEvent.Type.KeyRelease, modifier, Qt.KeyboardModifier.NoModifier,
+            last_side, last_side, 0))
+        assert dialog.use_shortcut.isEnabled()
+        dialog.use_shortcut.click()
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        assert dialog.chord == expected
+    finally:
+        parent.close()
+
+
+@pytest.mark.parametrize("modifier, mask, left_side, right_side, expected", [
+    (Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier, 55, 54, "win+space"),
+    (Qt.Key.Key_Meta, Qt.KeyboardModifier.MetaModifier, 59, 62, "ctrl+space"),
+    (Qt.Key.Key_Alt, Qt.KeyboardModifier.AltModifier, 58, 61, "alt+space"),
+    (Qt.Key.Key_Shift, Qt.KeyboardModifier.ShiftModifier, 56, 60, "shift+space"),
+])
+@pytest.mark.parametrize("release_left_first", [True, False])
+def test_macos_both_modifier_sides_require_final_aggregate_release(
+    application, monkeypatch, modifier, mask, left_side, right_side, expected,
+    release_left_first,
+):
+    monkeypatch.setattr(ui, "sys", SimpleNamespace(platform="darwin"))
+    parent = MainWindow()
+    dialog = ShortcutDialog(parent)
+    try:
+        for kind, key, modifiers, code in (
+            (QEvent.Type.KeyPress, modifier, mask, left_side),
+            (QEvent.Type.KeyPress, modifier, mask, right_side),
+            (QEvent.Type.KeyPress, Qt.Key.Key_Space, mask, 49),
+            (QEvent.Type.KeyRelease, Qt.Key.Key_Space, mask, 49),
+        ):
+            assert dialog.eventFilter(dialog, QKeyEvent(kind, key, modifiers, code, code, 0))
+        assert dialog.chord == expected
+        assert not dialog.use_shortcut.isEnabled()
+
+        first_side, last_side = ((left_side, right_side) if release_left_first
+                                 else (right_side, left_side))
+        # The aggregate mask remains set while the opposite side is held.
+        # QKeyEvent.modifiers() toggles this key's bit; the constructor receives
+        # the raw aggregate state exposed by QInputEvent.modifiers().
+        assert dialog.eventFilter(dialog, QKeyEvent(
+            QEvent.Type.KeyRelease, modifier, mask, first_side, first_side, 0))
+        assert not dialog.use_shortcut.isEnabled()
+        dialog.use_shortcut.click()
+        assert dialog.result() != QDialog.DialogCode.Accepted
+
+        assert dialog.eventFilter(dialog, QKeyEvent(
+            QEvent.Type.KeyRelease, modifier, Qt.KeyboardModifier.NoModifier,
+            last_side, last_side, 0))
+        assert dialog.use_shortcut.isEnabled()
+        dialog.use_shortcut.click()
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        assert dialog.chord == expected
+    finally:
+        parent.close()
+
+
+def test_macos_capture_rejects_shifted_punctuation_instead_of_using_hardware_digit(
+    application, monkeypatch,
+):
+    monkeypatch.setattr(ui, "sys", SimpleNamespace(platform="darwin"))
+    parent = MainWindow()
+    dialog = ShortcutDialog(parent)
+    modifiers = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+    press = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Exclam, modifiers, 0x12, 0x12, 0)
+    release = QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Exclam,
+                        Qt.KeyboardModifier.NoModifier, 0x12, 0x12, 0)
+    assert dialog.eventFilter(dialog, press)
+    assert dialog.eventFilter(dialog, release)
+    assert not dialog.chord
+    assert not dialog.use_shortcut.isEnabled()
+    assert "letter, number, Space or F1–F12" in dialog.feedback.text()
     parent.close()
 
 
@@ -294,6 +426,25 @@ def test_global_callbacks_target_foreground_application_in_both_modes(controller
     assert controller.state == "idle"
 
 
+def test_macos_clipboard_shortcut_records_without_accessibility(controller, monkeypatch, tmp_path):
+    model = InstalledModel(tmp_path / "english", "English", ("en",))
+    controller.models_scanned(controller._scan_epoch, [model])
+    monkeypatch.setattr(desktop, "sys", SimpleNamespace(platform="darwin"))
+
+    def denied_target_capture():
+        raise RuntimeError("Accessibility permission is denied")
+
+    monkeypatch.setattr(desktop, "foreground_window", denied_target_capture)
+    monkeypatch.setattr(controller, "recorder", Mock(level=0, error=None, limit_reached=False))
+    try:
+        controller.listener.on_press()
+        assert controller.state == "recording"
+    finally:
+        controller.timer.stop()
+        controller.recorder.cancel()
+        controller.update_state("idle")
+
+
 def test_release_does_not_stop_button_started_recording_or_replaced_listener(controller):
     controller.state = "recording"
     controller.stop_recording = Mock()
@@ -393,8 +544,6 @@ def test_recording_shortcut_does_not_invoke_application_quit(controller, applica
 def test_stale_model_scan_cannot_replace_selection_or_end_recording(
     controller, monkeypatch, tmp_path, outcome,
 ):
-    from talknj.models import InstalledModel
-
     pending = []
     monkeypatch.setattr(controller, "run_job", lambda function, result, failure:
                         pending.append((result, failure)))
@@ -413,3 +562,148 @@ def test_stale_model_scan_cannot_replace_selection_or_end_recording(
     assert controller.window.model.currentData() == str(latest.path)
     assert controller.state == "recording"
     assert "Storage disconnected" not in controller.window.notice.text()
+
+
+@pytest.mark.parametrize("saved", ["", "missing-folder"])
+@pytest.mark.parametrize("backends, expected", [
+    (["whisper.cpp", "sherpa-onnx", "faster-whisper"], "whisper.cpp"),
+    (["sherpa-onnx", "faster-whisper"], "sherpa-onnx"),
+    (["faster-whisper"], "faster-whisper"),
+    ([], ""),
+])
+def test_refresh_defaults_to_first_available_preferred_model_without_download(
+    controller, monkeypatch, tmp_path, saved, backends, expected,
+):
+    available = [InstalledModel(tmp_path / backend, backend, ("en",), backend)
+                 for backend in backends]
+    monkeypatch.setattr(desktop, "discover_models", lambda root, imported: available)
+    download = Mock(side_effect=AssertionError("Refresh must never download weights"))
+    monkeypatch.setattr(desktop, "download_model", download)
+    monkeypatch.setattr(controller, "run_job", lambda function, result, failure: result(function()))
+    controller.settings.model_path = saved
+
+    controller.refresh()
+
+    expected_path = str(tmp_path / expected) if expected else ""
+    assert controller.settings.model_path == expected_path
+    assert controller.window.model.currentData() == expected_path
+    assert (controller.active_model().backend if expected else "") == expected
+    download.assert_not_called()
+
+
+@pytest.mark.parametrize("saved_backend", ["whisper.cpp", "sherpa-onnx", "faster-whisper"])
+def test_valid_saved_model_survives_refresh_instead_of_reverting_to_default(
+    controller, tmp_path, saved_backend,
+):
+    available = [InstalledModel(tmp_path / backend, backend, ("en",), backend)
+                 for backend in ("whisper.cpp", "sherpa-onnx", "faster-whisper")]
+    controller.settings.model_path = str(tmp_path / saved_backend)
+    controller.persist()
+    controller.settings, warning = load_settings()
+    assert not warning
+
+    controller.models_scanned(controller._scan_epoch, available)
+
+    assert controller.active_model().backend == saved_backend
+    assert controller.window.model.currentData() == str(tmp_path / saved_backend)
+
+
+def test_manual_model_selection_survives_new_preferred_install_refresh_and_reload(controller, tmp_path):
+    slower = InstalledModel(tmp_path / "english", "English", ("en",))
+    parakeet = InstalledModel(tmp_path / "onnx", "Parakeet", ("en",), "sherpa-onnx")
+    whisper = InstalledModel(tmp_path / "ggml", "Whisper", ("en", "vi"), "whisper.cpp")
+    controller.settings.model_path = ""
+    controller.models_scanned(controller._scan_epoch, [parakeet, slower])
+    assert controller.active_model() == parakeet
+
+    controller.window.model.setCurrentIndex(controller.window.model.findData(str(slower.path)))
+    assert controller.active_model() == slower
+    assert load_settings()[0].model_path == str(slower.path)
+    controller.models_scanned(controller._scan_epoch, [whisper, parakeet, slower])
+    assert controller.active_model() == slower
+
+    controller.settings, warning = load_settings()
+    assert not warning
+    controller.models = []
+    controller.window.show_models([], "")
+    controller.models_scanned(controller._scan_epoch, [whisper, parakeet, slower])
+    assert controller.active_model() == slower
+    assert controller.window.model.currentData() == str(slower.path)
+
+
+@pytest.mark.parametrize("elapsed, expected", [
+    (-1, "05:00"), (0, "05:00"), (0.001, "05:00"), (0.999, "05:00"),
+    (1, "04:59"), (59.999, "04:01"), (60, "04:00"), (60.001, "04:00"),
+    (MAX_SECONDS - 1, "00:01"), (MAX_SECONDS - 0.001, "00:01"),
+    (MAX_SECONDS, "00:00"), (MAX_SECONDS + 0.001, "00:00"),
+    (MAX_SECONDS + 60, "00:00"),
+])
+def test_both_recording_displays_count_down_at_second_and_cap_boundaries(
+    controller, monkeypatch, elapsed, expected,
+):
+    controller.started = 1000
+    controller.state = "recording"
+    monkeypatch.setattr(desktop, "time", SimpleNamespace(monotonic=lambda: 1000 + elapsed))
+    monkeypatch.setattr(controller, "recorder", Mock(level=0.37, error=None, limit_reached=False))
+    stop = Mock()
+    monkeypatch.setattr(controller, "stop_recording", stop)
+
+    controller.tick()
+
+    assert controller.window.elapsed.text() == f"{expected} remaining"
+    assert controller.indicator.text() == f"Listening · {expected} remaining"
+    assert controller.window.level.value() == 37
+    # The audio recorder, not display rounding or UI scheduling, enforces the cap.
+    stop.assert_not_called()
+
+
+def test_recording_countdown_resets_both_displays_for_each_session(controller, monkeypatch, tmp_path):
+    model = InstalledModel(tmp_path / "english", "English", ("en",))
+    controller.models_scanned(controller._scan_epoch, [model])
+    clock = [1000.0]
+    monkeypatch.setattr(desktop, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(controller, "recorder", Mock(level=0, error=None, limit_reached=False))
+
+    for target in (0, 0xBEEF):
+        controller.start_recording(target)
+        controller.timer.stop()
+        assert controller.window.elapsed.text() == "05:00 remaining"
+        assert controller.indicator.text() == "Listening · 05:00 remaining"
+        clock[0] += 1
+        controller.tick()
+        assert controller.window.elapsed.text() == "04:59 remaining"
+        assert controller.indicator.text() == "Listening · 04:59 remaining"
+        controller.update_state("idle")
+        clock[0] += 10
+
+    assert controller.recorder.start.call_count == 2
+
+
+def test_audio_capture_limit_still_stops_recording_at_zero(controller, monkeypatch):
+    controller.started = 1000
+    controller.state = "recording"
+    monkeypatch.setattr(desktop, "time", SimpleNamespace(monotonic=lambda: 1000 + MAX_SECONDS))
+    monkeypatch.setattr(controller, "recorder", Mock(level=0, error=None, limit_reached=True))
+    stop = Mock()
+    monkeypatch.setattr(controller, "stop_recording", stop)
+
+    controller.tick()
+
+    assert controller.window.elapsed.text() == "00:00 remaining"
+    assert controller.indicator.text() == "Listening · 00:00 remaining"
+    stop.assert_called_once_with()
+
+
+
+
+@pytest.mark.parametrize("platform", ["linux", "freebsd", "unsupported"])
+def test_main_rejects_other_platforms_before_creating_qt(monkeypatch, capsys, platform):
+    monkeypatch.setattr(desktop, "sys", SimpleNamespace(platform=platform, stderr=sys.stderr))
+    app_factory = Mock()
+    monkeypatch.setattr(desktop, "QApplication", app_factory)
+
+    assert desktop.main() == 1
+
+    app_factory.assert_not_called()
+    assert "Windows or macOS" in capsys.readouterr().err
+

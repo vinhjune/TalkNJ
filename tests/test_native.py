@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
+
 from talknj import native
+
+# These cases patch the in-module Win32 boundary, not the Darwin delegation.
+pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="Win32 boundary regressions; see test_native_macos.py")
 
 
 class HotkeyValidationTests(unittest.TestCase):

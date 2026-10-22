@@ -4,10 +4,17 @@ from dataclasses import asdict, dataclass, field, fields
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 
 def data_directory() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TalkNJ"
+    return _legacy_data_directory()
+
+
+def _legacy_data_directory() -> Path:
     base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
     return base / "TalkNJ"
 
@@ -25,6 +32,7 @@ class Settings:
 
 
 def load_settings(path: Path | None = None) -> tuple[Settings, str]:
+    default_path = path is None
     path = path or data_directory() / "settings.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -55,6 +63,16 @@ def load_settings(path: Path | None = None) -> tuple[Settings, str]:
             settings.hotkey_mode = defaults.hotkey_mode
         return settings, ""
     except FileNotFoundError:
+        if default_path and sys.platform == "darwin":
+            legacy = _legacy_data_directory() / "settings.json"
+            if legacy.is_file():
+                settings, warning = load_settings(legacy)
+                if warning:
+                    return settings, warning
+                return settings, (
+                    f"Existing settings loaded from {legacy}. Future saves use {path}; "
+                    "existing model folders have not been moved."
+                )
         return Settings(), ""
     except (OSError, ValueError, TypeError) as exc:
         return Settings(), f"Could not read settings; defaults loaded. Original file kept. {exc}"

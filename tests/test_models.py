@@ -20,6 +20,8 @@ from talknj import models
 from talknj import _model_formats
 from talknj import transcription
 
+_TINY_EN = next(spec for spec in models.CATALOG if spec.id == "tiny.en")
+
 
 @lru_cache(maxsize=4)
 def _model_files(multilingual: bool = False, include_timestamps: bool = False) -> dict[str, bytes]:
@@ -124,6 +126,10 @@ def _network(
 
 def test_catalog_is_immutable_and_exposes_required_languages() -> None:
     by_id = {spec.id: spec for spec in models.CATALOG}
+    assert tuple(by_id) == (
+        "whisper.cpp-base", "parakeet-tdt-0.6b-v2-int8",
+        "tiny.en", "base.en", "small.en", "tiny", "base", "small",
+    )
     assert {"tiny.en", "base.en", "small.en", "base", "small"}.issubset(by_id)
     assert by_id["tiny.en"].languages == ("en",)
     assert by_id["base"].languages == ("en", "vi")
@@ -231,7 +237,7 @@ def test_download_is_atomic_pinned_and_reports_monotonic_byte_progress(
         observed.append((done, total, name))
         assert models.discover_models(root, []) == []
 
-    path = models.download_model(models.CATALOG[0], root, progress, Event())
+    path = models.download_model(_TINY_EN, root, progress, Event())
     assert path == (root / "tiny.en").resolve()
     assert models.validate_model(path).languages == ("en",)
     total = sum(map(len, files.values()))
@@ -245,7 +251,7 @@ def test_download_is_atomic_pinned_and_reports_monotonic_byte_progress(
 def test_unknown_download_sizes_report_zero_total(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _network(monkeypatch, _model_files(), unknown_sizes=True)
     progress: list[tuple[int, int, str]] = []
-    models.download_model(models.CATALOG[0], tmp_path / "models", lambda *args: progress.append(args), Event())
+    models.download_model(_TINY_EN, tmp_path / "models", lambda *args: progress.append(args), Event())
     assert all(total == 0 for _, total, _ in progress)
     assert progress[-1][0] > 0
 
@@ -259,7 +265,7 @@ def test_failed_download_never_installs_or_leaves_staging(
              wrong_checksum=failure == "checksum")
     root = tmp_path / "models"
     with pytest.raises(models.ModelError):
-        models.download_model(models.CATALOG[0], root, lambda *_: None, Event())
+        models.download_model(_TINY_EN, root, lambda *_: None, Event())
     assert list(root.iterdir()) == []
 
 
@@ -268,7 +274,7 @@ def test_cancel_before_download_does_not_contact_server(tmp_path: Path, monkeypa
     cancel = Event()
     cancel.set()
     with pytest.raises(models.DownloadCancelled):
-        models.download_model(models.CATALOG[0], tmp_path / "models", lambda *_: None, cancel)
+        models.download_model(_TINY_EN, tmp_path / "models", lambda *_: None, cancel)
     assert calls == []
     assert not (tmp_path / "models").exists()
 
@@ -288,7 +294,7 @@ def test_cancel_removes_all_incomplete_files(
             cancel.set()
 
     with pytest.raises(models.DownloadCancelled):
-        models.download_model(models.CATALOG[0], root, progress, cancel)
+        models.download_model(_TINY_EN, root, progress, cancel)
     assert list(root.iterdir()) == []
     assert models.discover_models(root, []) == []
 
@@ -297,7 +303,7 @@ def test_existing_good_model_is_reused_without_network(tmp_path: Path, monkeypat
     root = tmp_path / "models"
     model = _write_model(root / "tiny.en")
     calls = _network(monkeypatch, _model_files())
-    assert models.download_model(models.CATALOG[0], root, lambda *_: None, Event()) == model.resolve()
+    assert models.download_model(_TINY_EN, root, lambda *_: None, Event()) == model.resolve()
     assert calls == []
 
 
@@ -309,7 +315,7 @@ def test_existing_invalid_folder_is_not_overwritten(tmp_path: Path, monkeypatch:
     marker.write_text("preserve me", encoding="utf-8")
     calls = _network(monkeypatch, _model_files())
     with pytest.raises(models.ModelError, match="already exists"):
-        models.download_model(models.CATALOG[0], root, lambda *_: None, Event())
+        models.download_model(_TINY_EN, root, lambda *_: None, Event())
     assert marker.read_text(encoding="utf-8") == "preserve me"
     assert calls == []
 
@@ -324,7 +330,7 @@ def test_download_rejects_catalog_language_mismatch(tmp_path: Path, monkeypatch:
     _network(monkeypatch, _model_files(multilingual=True))
     root = tmp_path / "models"
     with pytest.raises(models.ModelError, match="languages"):
-        models.download_model(models.CATALOG[0], root, lambda *_: None, Event())
+        models.download_model(_TINY_EN, root, lambda *_: None, Event())
     assert list(root.iterdir()) == []
 
 
@@ -553,6 +559,27 @@ def _write_native_model(path: Path, files: dict[str, bytes]) -> Path:
     for name, content in files.items():
         (path / name).write_bytes(content)
     return path
+
+
+def test_discovery_prioritizes_native_backends_even_for_renamed_imports(
+    tmp_path: Path, native_payloads: dict[str, dict[str, bytes]],
+) -> None:
+    root = tmp_path / "models"
+    faster_a = _write_model(root / "a-english")
+    faster_b = _write_model(root / "b-english")
+    parakeet = _write_native_model(root / "z-native", native_payloads["sherpa-onnx"])
+    imported_faster = _write_model(tmp_path / "external-english")
+    imported_parakeet = _write_native_model(tmp_path / "renamed-onnx", native_payloads["sherpa-onnx"])
+    imported_whisper = _write_native_model(tmp_path / "renamed-ggml", native_payloads["whisper.cpp"])
+    imported = [str(imported_faster), str(imported_parakeet), str(imported_whisper)]
+
+    found = models.discover_models(root, imported)
+
+    assert [model.path for model in found] == [
+        path.resolve() for path in (
+            imported_whisper, parakeet, imported_parakeet, faster_a, faster_b, imported_faster,
+        )
+    ]
 
 
 @pytest.mark.parametrize("backend", ["sherpa-onnx", "whisper.cpp"])

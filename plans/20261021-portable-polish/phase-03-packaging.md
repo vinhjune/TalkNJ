@@ -1,0 +1,26 @@
+# Native portable packaging and verification
+- [x] Native Windows tooling produced `dist/TalkNJ/TalkNJ.exe` and `dist/TalkNJ-windows-x64.zip`; Python launch support is retained.
+- [x] Build metadata includes native runtimes, UI SVG assets and macOS microphone usage/permissions identifiers; Intel/Apple Silicon dependency resolution has been checked separately.
+- [x] The Windows executable launches with Python removed from PATH. Its actual model/preference dropdowns, scrollbar, recording countdown and discard-and-quit flow were exercised and visually inspected.
+- [x] All three packaged speech engines complete actual offline inference in the final Windows artifact: whisper.cpp-base, Parakeet int8 and faster-whisper tiny.en.
+- [ ] Produce and exercise actual native Intel/Apple Silicon macOS `.app` archives. **Blocked:** no native Mac or runnable Mac build runner is available; source and build tooling are not Mac artifacts.
+- [x] The final behavior suite passes: **308 passed, 3 skipped**; Ruff passes. Platform limitations, native/Python launch and build instructions, external model/settings storage and permission requirements are documented.
+
+## Artifact evidence
+- The pre-icon Windows archive was 155,336,757 bytes. ZIP CRC validation passed; the archive contained its executable and SVG UI assets and did not bundle the selected speech-model weights.
+- The actual executable was launched with an isolated settings location and a PATH restricted to Windows system directories; it exited cleanly after the active recording was discarded.
+- Frozen inference produced the expected actual speech transcripts from all three engines with imports restricted to the bundle and Python socket connections blocked. A repeated whisper.cpp transcription reused the same native worker process. Explicit transcript receipts were required, not just a zero process exit.
+- macOS wheel-only dependency resolution succeeded for both x86_64 and arm64. Native privacy prompts, Cocoa event ordering, typing/focus behavior and packaged binaries remain unverified until a Mac is available.
+- Independent source review identified local Cmd+Q dispatch and aggregate modifier identity issues; both were repaired with failed-before/passed-after regressions. The follow-up review found no further blocking source finding in those repairs.
+- The native workflow now gates archive upload on `smoke_portable.py`, a model-free frozen-runtime import and Qt render check with a new evidence directory per run. It cannot accept stale receipts or silently fall back to source/venv imports.
+- Native setup/build now imports the compiled whisper.cpp extension; macOS additionally runs `file` to display the actual Mach-O architecture. Setup rejects Python/shell architecture mismatches. Executing those Mac checks still requires a native runner.
+- The rebuilt Windows artifact passes the model-free frozen smoke, including production-controller imports and visual inspection of the rendered Qt window. Restoring frozen import roots after multiprocessing preparation fixed the harness's first-run import failure without adding source/venv fallback paths.
+- An actual zero-exit frozen bootstrap that never ran the target was rejected because its fresh receipt was missing. Successful runtime and three-engine inference receipts are `dist/smoke/bundle-0hjxydqa/runtime.json` and `.smoke/final-models-9vg8ps4w/inference.json`; the rejected bootstrap used its own new evidence directory.
+
+## User-provided icon integration (2026-10-22)
+- The text-free microphone/speech-bubble artwork from `images/design.png` supplies application/window/tray branding and native platform icons. Qt loads portable PNGs: the larger text-free tile plus the sheet's dedicated 16/24/32/48/64 variants. Those dedicated variants also supply the corresponding Windows ICO frames; ICNS retains the larger artwork. All assets are included in Python wheels and frozen bundles; the full design sheet is excluded.
+- Real Windows window/tray surfaces displayed the PNG icons. Size-selection checks prove each small runtime frame matches its corresponding PNG; light/dark previews and the actual title bar were inspected. Source Qt decoded all seven ICO frames; EXE resource payloads match them exactly.
+- The existing portable application was running and locked its DLLs. Its folder/processes were preserved; the successful refreshed build is `dist/branded/TalkNJ/TalkNJ.exe`. The updated `dist/TalkNJ-windows-x64.zip` is **156,044,423 bytes** and passes ZIP CRC and artwork checks. Quit the old instance before launching the new application.
+- The production frozen smoke passed against that separate build, with bundle-only runtime imports and rendered window/icon output: `dist/smoke/png-icons-jylk_heo/runtime.json`, `runtime.png` and `runtime.icon.png`. The frozen 64px result matches its dedicated PNG exactly. The smoke rejects an unreadable application icon. Speech inference was not rerun for this artwork-only change.
+- Current regressions: **308 passed, 3 skipped**; Ruff passes. README keeps source-artwork and runtime/native asset roles rather than generation details. Native macOS build/runtime verification remains blocked; PNG runtime assets and generated ICNS do not close that gate.
+

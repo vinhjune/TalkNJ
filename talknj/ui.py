@@ -1,13 +1,18 @@
 """Qt widgets only; recording, inference and OS integration live outside the view."""
 
+from math import ceil
+from pathlib import Path
+import sys
+
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPixmap
+from PySide6.QtGui import QIcon, QInputEvent, QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QListView, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
+    QScrollArea, QStackedWidget, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
+from talknj.audio import MAX_SECONDS
 from talknj.models import CATALOG
 from talknj.native import format_hotkey, validate_hotkey
 
@@ -33,34 +38,74 @@ QPushButton#primary:hover { background: #3d4fbd; }
 QPushButton#primary:disabled { background: #c1c7e7; color: #f7f8ff; }
 QPushButton#nav { text-align: left; border: none; background: transparent; padding: 12px 16px; }
 QPushButton#nav:checked { color: #3e50bc; background: #edf0ff; }
-QComboBox, QLineEdit { background: #ffffff; border: 1px solid #d8dfeb; border-radius: 7px;
+QLineEdit { background: #ffffff; border: 1px solid #d8dfeb; border-radius: 7px;
     padding: 9px; min-height: 20px; selection-background-color: #4c5fd5; }
-QComboBox:disabled, QLineEdit:disabled { color: #9ba4b5; }
-QComboBox QAbstractItemView { background: white; selection-background-color: #edf0ff;
-    selection-color: #202839; padding: 4px; }
+QLineEdit:disabled { color: #9ba4b5; }
+QComboBox { background: #ffffff; border: 1px solid #d8dfeb; border-radius: 8px;
+    padding: 9px 38px 9px 12px; min-height: 20px; combobox-popup: 0;
+    selection-background-color: #4c5fd5; }
+QComboBox:hover { background: #f8f9ff; border-color: #a5afe0; }
+QComboBox:focus, QComboBox:on { border-color: #4c5fd5; background: #f5f7ff; }
+QComboBox:disabled { color: #9ba4b5; background: #f3f4f7; border-color: #e2e6ed; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;
+    width: 32px; border: none; }
+QComboBox::down-arrow { image: url("__CHEVRON__"); width: 14px; height: 9px; }
+QComboBox::down-arrow:disabled { image: url("__CHEVRON_DISABLED__"); }
+QComboBox QAbstractItemView { background: #ffffff; color: #202839;
+    border: 1px solid #d8dfeb; border-radius: 10px; padding: 6px; outline: 0;
+    selection-background-color: #edf0ff; selection-color: #3e50bc; }
+QComboBox QAbstractItemView::item { min-height: 28px; padding: 5px 10px; border-radius: 6px; }
+QComboBox QAbstractItemView::item:hover { background: #f5f7ff; }
+QComboBox QAbstractItemView::item:selected { background: #edf0ff; color: #3e50bc; }
+QComboBox QAbstractItemView::item:disabled { color: #9ba4b5; }
+QMenu { background: #ffffff; border: 1px solid #d8dfeb; border-radius: 10px; padding: 6px; }
+QMenu::item { padding: 8px 18px; border-radius: 6px; }
+QMenu::item:selected { background: #edf0ff; color: #3e50bc; }
+QMenu::item:disabled { color: #9ba4b5; }
+QMenu::separator { height: 1px; background: #e3e6ed; margin: 6px; }
 QPlainTextEdit { background: #ffffff; border: 1px solid #e0e5ed; border-radius: 10px;
     padding: 14px; font-size: 16px; selection-background-color: #cbd3ff; }
 QProgressBar { border: none; background: #e8ecf4; border-radius: 4px; min-height: 7px;
     max-height: 7px; text-align: center; }
 QProgressBar::chunk { background: #6f7ee4; border-radius: 4px; }
 QScrollArea { border: none; background: transparent; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 3px 0; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 0 3px; }
+QScrollBar:focus { background: #edf0ff; border-radius: 5px; }
+QScrollBar::handle:vertical { background: #c1c9df; border-radius: 5px; min-height: 28px; }
+QScrollBar::handle:horizontal { background: #c1c9df; border-radius: 5px; min-width: 28px; }
+QScrollBar::handle:hover { background: #8796c7; }
+QScrollBar::handle:pressed { background: #6175ca; }
+QScrollBar::handle:disabled { background: #e2e6ed; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QToolTip { background: #202839; color: #ffffff; border: none; padding: 6px; }
-"""
+""".replace("__CHEVRON__", (Path(__file__).parent / "assets" / "chevron-down.svg").as_posix()).replace(
+    "__CHEVRON_DISABLED__", (Path(__file__).parent / "assets" / "chevron-down-disabled.svg").as_posix())
+
+
+def countdown_text(elapsed_seconds: float = 0) -> str:
+    """Round remaining time upward so 05:00 lasts until one second elapses."""
+    seconds = max(0, min(MAX_SECONDS, ceil(MAX_SECONDS - elapsed_seconds)))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def combo_box() -> QComboBox:
+    """Use an owned Qt popup/delegate so the stylesheet works on both platforms."""
+    combo = QComboBox()
+    view = QListView(combo)
+    view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    combo.setView(view)
+    combo.setItemDelegate(QStyledItemDelegate(combo))
+    return combo
 
 
 def app_icon() -> QIcon:
-    pix = QPixmap(64, 64)
-    pix.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pix)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor("#4c5fd5"))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawRoundedRect(0, 0, 64, 64, 17, 17)
-    painter.setBrush(QColor("#ffffff"))
-    for x, y, h in ((16, 24, 16), (26, 15, 34), (36, 21, 22), (46, 27, 10)):
-        painter.drawRoundedRect(x, y, 5, h, 2.5, 2.5)
-    painter.end()
-    return QIcon(pix)
+    assets = Path(__file__).parent / "assets"
+    icon = QIcon(str(assets / "talknj.png"))
+    for size in (16, 24, 32, 48, 64):
+        icon.addFile(str(assets / f"talknj-{size}.png"))
+    return icon
 
 
 def label(text: str, name: str = "", wrap: bool = False) -> QLabel:
@@ -83,7 +128,10 @@ class ShortcutDialog(QDialog):
     """Consume shortcut events before Qt actions can handle a captured chord."""
 
     _MODIFIER_KEYS = {
-        Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta,
+        Qt.Key.Key_Control: Qt.KeyboardModifier.ControlModifier,
+        Qt.Key.Key_Alt: Qt.KeyboardModifier.AltModifier,
+        Qt.Key.Key_Shift: Qt.KeyboardModifier.ShiftModifier,
+        Qt.Key.Key_Meta: Qt.KeyboardModifier.MetaModifier,
     }
 
     def __init__(self, parent: QWidget):
@@ -96,8 +144,9 @@ class ShortcutDialog(QDialog):
         self._capturing = True
         layout = QVBoxLayout(self)
         layout.addWidget(label("Press your shortcut", "section"))
+        modifier_names = "Control, Option, Shift or Cmd" if sys.platform == "darwin" else "Ctrl, Alt, Shift or Win"
         layout.addWidget(label(
-            "Hold Ctrl, Alt, Shift or Win, then press a letter, number, Space or F1–F12. "
+            f"Hold {modifier_names}, then press a letter, number, Space or F1–F12. "
             "Release all keys, then choose Use shortcut. Escape cancels.", "muted", True))
         self.preview = label("Waiting for keys…", "section")
         layout.addWidget(self.preview)
@@ -131,9 +180,16 @@ class ShortcutDialog(QDialog):
         if event.isAutoRepeat():
             return True
         key = event.key()
-        physical_key = (key, event.nativeScanCode(), event.nativeVirtualKey())
+        # Cocoa sends aggregate modifier transitions: the final release may
+        # come from the opposite physical side to the initial press.
+        aggregate_modifier = sys.platform == "darwin" and key in self._MODIFIER_KEYS
+        physical_key = ((key, 0, 0) if aggregate_modifier
+                        else (key, event.nativeScanCode(), event.nativeVirtualKey()))
         if kind == QEvent.Type.KeyRelease:
-            self._down.discard(physical_key)
+            # QKeyEvent.modifiers() toggles the released modifier's own bit.
+            # The base accessor preserves Cocoa's aggregate held-key state.
+            if not (aggregate_modifier and QInputEvent.modifiers(event) & self._MODIFIER_KEYS[key]):
+                self._down.discard(physical_key)
             if not self._down:
                 self.use_shortcut.setEnabled(bool(self.chord))
                 if self.chord:
@@ -155,15 +211,16 @@ class ShortcutDialog(QDialog):
             return True
         self.chord = ""
         modifiers = event.modifiers()
+        # Qt maps ControlModifier to Command and MetaModifier to Control on macOS.
         names = [name for mask, name in (
-            (Qt.KeyboardModifier.ControlModifier, "ctrl"),
+            (Qt.KeyboardModifier.ControlModifier, "win" if sys.platform == "darwin" else "ctrl"),
             (Qt.KeyboardModifier.AltModifier, "alt"),
             (Qt.KeyboardModifier.ShiftModifier, "shift"),
-            (Qt.KeyboardModifier.MetaModifier, "win"),
+            (Qt.KeyboardModifier.MetaModifier, "ctrl" if sys.platform == "darwin" else "win"),
         ) if modifiers & mask]
-        # Native virtual keys match the global hook even on non-US layouts.
-        # Qt-created events have no native code; use logical keys for those.
-        vk = event.nativeVirtualKey()
+        # Only Windows virtual keys share the codes expected by its global hook.
+        # macOS nativeVirtualKey is a hardware code, not a Windows VK identity.
+        vk = event.nativeVirtualKey() if sys.platform == "win32" else 0
         trigger = ""
         if vk:
             if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
@@ -180,12 +237,12 @@ class ShortcutDialog(QDialog):
             trigger = f"f{key - Qt.Key.Key_F1 + 1}"
         try:
             if modifiers & Qt.KeyboardModifier.GroupSwitchModifier or key == Qt.Key.Key_AltGr:
-                raise ValueError("AltGr is not supported. Use Ctrl, Alt, Shift or Win instead.")
+                raise ValueError("AltGr is not supported. Choose another modifier combination.")
             if sum(held[0] not in self._MODIFIER_KEYS for held in self._down) != 1:
                 raise ValueError("Choose exactly one letter, number, Space or F1–F12 with your modifiers.")
             if not names or not trigger:
                 raise ValueError(
-                    "Use at least one of Ctrl, Alt, Shift or Win with a letter, number, Space or F1–F12.")
+                    "Use at least one modifier with a letter, number, Space or F1–F12.")
             self.chord = validate_hotkey("+".join([*names, trigger]))
         except ValueError as exc:
             self.preview.setText("Unsupported shortcut")
@@ -311,7 +368,7 @@ class MainWindow(QMainWindow):
         self.record.setEnabled(False)
         self.record.clicked.connect(self.record_requested)
         controls.addWidget(self.record)
-        self.elapsed = label("00:00 / 05:00", "muted")
+        self.elapsed = label(f"{countdown_text()} remaining", "muted")
         controls.addWidget(self.elapsed)
         controls.addStretch()
         box.addLayout(controls)
@@ -340,7 +397,7 @@ class MainWindow(QMainWindow):
                             "Download once, dictate offline. Choose a model for your language and machine.")
         frame, box = card()
         box.addWidget(label("Active model", "section"))
-        self.model = QComboBox()
+        self.model = combo_box()
         self.model.currentIndexChanged.connect(self.model_changed)
         box.addWidget(self.model)
         self.model_detail = label("No model installed", "muted", True)
@@ -401,13 +458,13 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setHorizontalSpacing(25)
         grid.setVerticalSpacing(18)
-        self.language = QComboBox()
+        self.language = combo_box()
         self.language.addItem("English", "en")
         self.language.addItem("Vietnamese — multilingual model required", "vi")
-        self.output = QComboBox()
+        self.output = combo_box()
         self.output.addItem("Clipboard only — copy, do not type", "clipboard")
         self.output.addItem("Type into active app + keep clipboard copy", "type")
-        self.microphone = QComboBox()
+        self.microphone = combo_box()
         self.microphone.setPlaceholderText("Choose an available microphone")
         for row, (title, widget) in enumerate((
             ("Dictation language", self.language), ("Text delivery", self.output),
@@ -437,18 +494,18 @@ class MainWindow(QMainWindow):
         row.addWidget(self.choose_hotkey)
         row.addWidget(self.apply_hotkey)
         box.addLayout(row)
-        self.hotkey_mode = QComboBox()
+        self.hotkey_mode = combo_box()
         self.hotkey_mode.addItem("Hold to talk — release to transcribe", "hold")
         self.hotkey_mode.addItem("Press to start — press again to stop", "toggle")
         self.hotkey_mode.currentIndexChanged.connect(self.preferences_changed)
         box.addWidget(self.hotkey_mode)
         self.hotkey_status = label("", "muted", True)
         box.addWidget(self.hotkey_status)
-        box.addWidget(label("Choose shortcut, then press the keys you want. Escape cancels. Apply activates and saves your choice. Windows-reserved or registered shortcuts may be unavailable; other apps can still respond to ordinary key events.", "muted", True))
+        box.addWidget(label("Choose shortcut, then press the keys you want. Escape cancels. Apply activates and saves your choice. System-reserved or registered shortcuts may be unavailable; other apps can still respond to ordinary key events.", "muted", True))
         layout.addWidget(frame)
         frame, box = card()
         box.addWidget(label("Background use & privacy", "section"))
-        box.addWidget(label("Closing this window keeps TalkNJ in the system tray so your shortcut still works. Use the tray menu to quit. Recording stops automatically at five minutes. Typing never activates another window; if focus changes, recover your text from the clipboard.", "muted", True))
+        box.addWidget(label("Closing this window keeps TalkNJ running in the background so your shortcut still works. Use the tray or menu-bar icon to quit. Recording stops automatically at five minutes. Typing never activates another window; if focus changes, recover your text from the clipboard.", "muted", True))
         layout.addWidget(frame)
         layout.addStretch()
 

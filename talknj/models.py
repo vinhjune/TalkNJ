@@ -46,17 +46,17 @@ class InstalledModel:
 
 
 CATALOG = (
+    ModelSpec("whisper.cpp-base", "Whisper Base (whisper.cpp)",
+              "ggerganov/whisper.cpp", 148, ("en", "vi"), "whisper.cpp"),
+    ModelSpec("parakeet-tdt-0.6b-v2-int8", "Parakeet TDT 0.6B v2 (int8)",
+              "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", 662, ("en",),
+              "sherpa-onnx"),
     ModelSpec("tiny.en", "Tiny English", "Systran/faster-whisper-tiny.en", 78, ("en",)),
     ModelSpec("base.en", "Base English", "Systran/faster-whisper-base.en", 148, ("en",)),
     ModelSpec("small.en", "Small English", "Systran/faster-whisper-small.en", 488, ("en",)),
     ModelSpec("tiny", "Tiny multilingual", "Systran/faster-whisper-tiny", 78, ("en", "vi")),
     ModelSpec("base", "Base multilingual", "Systran/faster-whisper-base", 148, ("en", "vi")),
     ModelSpec("small", "Small multilingual", "Systran/faster-whisper-small", 488, ("en", "vi")),
-    ModelSpec("parakeet-tdt-0.6b-v2-int8", "Parakeet TDT 0.6B v2 (int8)",
-              "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", 662, ("en",),
-              "sherpa-onnx"),
-    ModelSpec("whisper.cpp-base", "Whisper Base (whisper.cpp)",
-              "ggerganov/whisper.cpp", 148, ("en", "vi"), "whisper.cpp"),
 )
 
 
@@ -288,6 +288,10 @@ def discover_models(root: Path, imported: list[str]) -> list[InstalledModel]:
         if identity not in seen:
             seen.add(identity)
             found.append(model)
+    # Stable sorting keeps managed/imported ordering within each backend while
+    # preferring native engines even when their folders have been renamed.
+    priority = {"whisper.cpp": 0, "sherpa-onnx": 1}
+    found.sort(key=lambda model: priority.get(model.backend, 2))
     return found
 
 

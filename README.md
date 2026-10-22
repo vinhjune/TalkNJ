@@ -1,10 +1,12 @@
 # TalkNJ
 
-Private voice dictation for Windows 10/11 x64. Speak, release your shortcut, and get text in your clipboard or the application you were using. Audio is transcribed **on your CPU** with local Whisper or Parakeet models, not a cloud service.
+Private voice dictation for Windows 10/11 x64 and macOS 14+ (Apple Silicon or Intel). Speak, release your shortcut, and get text in your clipboard or the application you were using. Audio is transcribed **on your CPU** with local Whisper or Parakeet models, not a cloud service. Windows is runtime-verified; the macOS implementation/build path still requires verification on a real Mac.
 
 This is **speech-to-text**, not text-to-speech. Recognition happens after recording stops; it is not live word-by-word streaming.
 
 ## Run from source
+
+### Windows
 
 Install **Python 3.11–3.13 x64** with the Windows Python launcher, then run in PowerShell:
 
@@ -22,29 +24,37 @@ py -3.13 -m venv .venv  # or -3.12 / -3.11, matching your installation
 
 No CUDA, GPU, separately installed FFmpeg, API key, account or administrator privilege is required. PyAV 16.0.1, CTranslate2 4.6.0 and its compatible setuptools runtime are pinned after Windows import verification; CTranslate2 currently emits a dependency deprecation warning that does not affect inference. If a Windows native dependency fails to load, install the Microsoft Visual C++ 2015–2022 x64 Redistributable from Microsoft.
 
+### macOS
+
+Install native **Python 3.11–3.13, 64-bit**, then run `sh start.sh` in Terminal. Initial setup uses `setup.sh`; run `sh setup.sh --dev` for development/build tools. Later launches do not invoke pip. Direct Python execution remains available with `.venv/bin/python -m talknj` or `.venv/bin/python launch.py`.
+
+The pinned PyAV Apple Silicon wheel requires **macOS 14 or newer**. Intel Macs also need Xcode Command Line Tools (`xcode-select --install`): the pinned whisper.cpp binding has no Intel Mac wheel, so setup builds its CPU extension from source with portable static-library flags. Use native Python for the target architecture, not a mixed Rosetta environment.
+
 ## First dictation
 
-1. Open **Model library**. Optionally choose a download location, then download **Tiny English** for the quickest start or **Base English** for a better accuracy/speed balance.
+1. Open **Model library**. Optionally choose a download location, then download **Whisper Base (whisper.cpp)**, the preferred default, or choose another catalog model. **Parakeet** follows it; the existing faster-whisper models retain their previous order. Downloads are always explicit.
 2. Select the installed model. To reuse existing files, choose **Use existing model folder**. Imports reference that folder; they do not copy it.
 3. Open **Preferences** to choose a microphone, language and output. For the global shortcut, click **Choose shortcut…**, press a modifier plus a letter, number, Space or F1–F12, release every key, then choose **Use shortcut** and **Apply shortcut**. Escape cancels without changing the current binding.
 4. Focus a text field in another app. By default, hold **Ctrl + Alt + Space** while speaking, then release to transcribe. Alternatively select **Press to start — press again to stop**.
 5. **Clipboard only** is the safe initial output: paste when ready. Select **Type into active app + keep clipboard copy** for automatic insertion.
 
-The recording button is a preview workflow: it records into TalkNJ and copies the result without typing into a previously focused application. The latest transcript can be edited and copied again. Silence detection avoids producing text for recordings without detected speech. Recordings stop automatically after **five minutes**: an application safety guard for in-memory capture and bounded transcription work, not a universal speech-model duration limit.
+The recording button is a preview workflow: it records into TalkNJ and copies the result without typing into a previously focused application. The latest transcript can be edited and copied again. Silence detection avoids producing text for recordings without detected speech. Both the main display and background listening indicator count down from **05:00 remaining**. Recordings still stop automatically after **five minutes**: an unchanged application safety guard for in-memory capture and bounded transcription work, not a universal speech-model duration limit.
 
-Closing the window keeps the app in the system tray and leaves the global shortcut active. Use **App → Quit TalkNJ**, **Ctrl+Q**, or the tray's **Quit TalkNJ** to exit. If Ctrl+Q is your recording shortcut, it no longer also triggers TalkNJ's Quit action; the menu and tray still work. Only one instance runs per Windows user.
+Closing the window keeps the app in the system tray/menu bar and leaves the global shortcut active. Use **App → Quit TalkNJ** or the tray/menu-bar **Quit TalkNJ** to exit. Only one instance runs per user.
 
 ## Models and languages
 
 | Model family | Approximate download | Languages in TalkNJ | Tradeoff |
 |---|---:|---|---|
+| Whisper Base (whisper.cpp) | 148 MB | English and Vietnamese | Preferred default; actual whisper.cpp CPU runtime; standard unquantized GGML Base |
+| Parakeet TDT 0.6B v2 (int8) | 662 MB | English only | Second preference; larger English model with sherpa-onnx CPU runtime |
 | Tiny / Tiny English | 78 MB | Multilingual: English and Vietnamese; `.en`: English only | Lowest resource use, less accurate |
 | Base / Base English | 148 MB | Multilingual: English and Vietnamese; `.en`: English only | Balanced starting point |
 | Small / Small English | 488 MB | Multilingual: English and Vietnamese; `.en`: English only | Better accuracy, more CPU/RAM and latency |
-| Parakeet TDT 0.6B v2 (int8) | 662 MB | English only | Larger English model; sherpa-onnx CPU runtime |
-| Whisper Base (whisper.cpp) | 148 MB | English and Vietnamese | Actual whisper.cpp CPU runtime; standard unquantized GGML Base |
 
 Download sizes are approximate decimal MB. Inference RAM use exceeds model file size and depends on model, audio duration and runtime. The faster-whisper and Parakeet entries use CPU int8 inference; whisper.cpp Base uses the standard unquantized GGML weights. Speed varies by machine; larger models are not guaranteed to feel instantaneous. Model discovery and imported-model integrity checks run in background jobs so hashing large files does not block the interface or shortcut setup.
+
+Without a valid selection, TalkNJ chooses the first available preferred model; a valid explicit choice survives discovery and refresh. Imported models are prioritized by their detected backend, even if their folders have been renamed. No missing model is downloaded automatically.
 
 For Vietnamese, select a **multilingual** model and choose Vietnamese in Preferences. Small multilingual is the recommended catalog choice for Vietnamese quality; Tiny multilingual is mainly a low-resource option. Switching to an English-only model switches the language back to English with a visible notice.
 
@@ -64,8 +74,7 @@ Downloads use [Systran faster-whisper exports](https://huggingface.co/Systran), 
 
 ## Local data and privacy
 
-Default settings: `%LOCALAPPDATA%\TalkNJ\settings.json`  
-Default models: `%LOCALAPPDATA%\TalkNJ\models`
+Windows settings and models default to `%LOCALAPPDATA%\TalkNJ\settings.json` and `%LOCALAPPDATA%\TalkNJ\models`. macOS uses `~/Library/Application Support/TalkNJ/` for the same files/folders. Legacy macOS settings under the old Windows-style location are read without moving model files or rewriting explicit paths; the next save uses the native location.
 
 You can change model storage or import models from another drive. Changing the download location keeps references to previously installed models; it does not move or delete their files. A missing external model folder must be reconnected or selected again.
 
@@ -73,7 +82,7 @@ You can change model storage or import models from another drive. Changing the d
 - Model loading and transcription are strictly local, including the tokenizer and bundled voice-activity detection model.
 - Network access occurs only during explicit model downloads in the app. Installing dependencies and packaging are separate online setup operations.
 - No analytics, account, cloud fallback or update checks are included.
-- Both output modes put the transcript in the **Windows clipboard**. Clipboard history, cloud clipboard sync, the target app and other software can retain it independently; disable Windows clipboard history/sync if that matters for your use.
+- Both output modes put the transcript in the **system clipboard**. Clipboard history/sync, the target app and other software can retain it independently; disable those services if that matters for your use.
 - Settings store model folders, microphone identity, language and shortcut, not transcripts. CPU/runtime/OS memory and crash handling are outside the app's no-history guarantee.
 
 ## Windows input limitations
@@ -85,29 +94,40 @@ You can change model storage or import models from another drive. Changing the d
 - If microphone setup fails, check **Windows Settings → Privacy & security → Microphone**, including desktop-app access. Close apps using exclusive audio mode, choose the correct input and refresh devices. Selection is saved by device name plus host API, then resolved to the current PortAudio index. Missing or duplicate identities require explicit reselection instead of silently recording another microphone.
 - Quitting discards an active recording only after confirmation. In-flight inference finishes before the process exits; model downloads receive a cancellation request.
 
-## Build a standalone Windows app
+## macOS permissions and input limitations
 
-```powershell
-.\build.ps1
-```
+- Allow **Microphone** and **Input Monitoring** for the global shortcut in **System Settings → Privacy & Security**. **Accessibility** is additionally required for foreground-target capture/automatic typing, not clipboard-only dictation. For source execution, permissions may belong to the launching Terminal/Python host; for a bundle, grant them to TalkNJ. Relaunch after granting permissions if macOS requires it. A denied global shortcut leaves the recording button available.
+- The passive Quartz listener does not suppress shortcuts in other apps. Use an unused chord. The chooser displays **Cmd/Option/Control/Shift**; Control and Command remain distinct despite Qt's macOS modifier translation.
+- If **Cmd+Q** is configured for recording, TalkNJ reserves that key only inside its own application; explicit menu/tray Quit remains available. It does not suppress Cmd+Q in other applications.
+- Unicode delivery checks the original application process, window and focused accessibility element, waits for held modifiers, and refuses changed or inaccessible targets. PID-targeted events narrow but **cannot eliminate an asynchronous focus-change race**. Secure input, password fields and inaccessible/custom controls can block listening or typing. The full transcript remains in the clipboard; partial insertion is possible. Prefer clipboard-only mode for sensitive contexts.
+- Microphone privacy prompts, native event delivery, keyboard layouts and app-specific Accessibility behavior have not yet been exercised on a real Mac. Cross-platform boundary regressions do not substitute for that verification.
 
-Or run these commands after creating `.venv`:
+## Build portable native apps
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm TalkNJ.spec
-```
+Build **on the target OS**; these are not cross-compilers. See [build_portable.py](build_portable.py), [TalkNJ.spec](TalkNJ.spec) and the manually triggered [native build workflow](.github/workflows/portable.yml).
 
-Run `dist\TalkNJ\TalkNJ.exe`. **Distribute the entire `dist\TalkNJ` folder**, not just the executable. Models stay outside the bundle and are downloaded/selected inside the app. The unsigned executable can trigger Windows SmartScreen; code signing and an installer are not included. PySide6/Qt and models have their own licenses; review bundled dependency/model terms before distribution. No project distribution license has been chosen.
+On Windows, run `.\build.ps1`. It creates `dist\TalkNJ\TalkNJ.exe` and `dist\TalkNJ-windows-x64.zip`. Run the executable from its folder; **distribute/extract the entire archive**, not just the `.exe`.
+
+On macOS, run `sh build.sh`. It creates `dist/TalkNJ.app` and an architecture-specific `dist/TalkNJ-macos-arm64.zip` or `dist/TalkNJ-macos-x86_64.zip`. Extract the archive and open the app. Intel builds have the source-compiler prerequisite described above; Apple Silicon and Intel are separate native artifacts, not one universal app.
+
+Both bundles include their Python/native runtimes and UI assets, **not speech weights**. Models/settings remain in external per-user storage, so portable distribution does not imply self-contained user data. Python launch support is retained.
+
+Application, window and tray icons use the text-free microphone/speech-bubble artwork from `images/design.png`. Qt uses portable PNG assets; native builds embed the Windows ICO or macOS ICNS.
+
+Setup/build imports the whisper.cpp native extension before proceeding; macOS also reports its Mach-O architecture with `file`. Setup rejects a Python interpreter whose architecture differs from the launching shell.
+
+After a native build, run `python smoke_portable.py` with the build environment's Python. It starts the **frozen executable**, loads all three speech runtimes and the native integration, and renders the Qt window and application icon without downloading weights, recording audio or requesting permissions. Each run writes a fresh receipt and screenshots under `dist/smoke/`; missing receipts, unreadable icons or runtime errors fail the check. The native workflow runs this check on every matrix target before uploading its archive. It is not a microphone, hotkey-permission or real-model inference test.
+
+Windows executables are unsigned and may trigger SmartScreen. macOS builds are ad-hoc signed, not Developer ID-signed or notarized; Gatekeeper can block them. For a trusted local build, use the macOS Privacy & Security **Open Anyway** flow rather than disabling Gatekeeper system-wide. Public distribution requires an appropriate signing/notarization process. No installer or project distribution license is included; review bundled dependency/model terms before redistribution.
 
 ## Development checks
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check talknj tests launch.py
+.\.venv\Scripts\python.exe -m ruff check talknj tests launch.py build_portable.py smoke_portable.py
 ```
 
-Tests isolate settings and substitute OS/audio/network boundaries; they do not record your microphone or modify your real clipboard. Delivery criteria are in `plans/20261021-local-dictation/` and `plans/20261021-models-shortcut/`.
+Use `.venv/bin/python` for those commands on macOS. Tests isolate settings and substitute OS/audio/network boundaries; they do not record your microphone or modify your real clipboard. Current delivery criteria and platform verification limits are in [the portable polish plan](plans/20261021-portable-polish/plan.md).
 
 The two native integration regressions are opt-in. Install both new catalog models, obtain the public [whisper.cpp JFK fixture](https://github.com/ggml-org/whisper.cpp/blob/master/samples/jfk.wav), then point the checks at those existing local files:
 
@@ -121,7 +141,7 @@ Without those environment variables, the integration cases skip rather than down
 
 ### Exercised Windows verification
 
-- In the default suite, **198 behavior tests pass**; three cases skip (the two opt-in native cases need local assets, and this Windows account lacks Developer Mode/administrator symlink permission). Both native integration cases also passed when run with local assets. Ruff reports no issues. The pinned CTranslate2 dependency emits the documented setuptools deprecation warning.
+- Run the development checks above for the current suite result. The two opt-in native cases need local assets; Windows symlink coverage also needs Developer Mode/administrator symlink permission. macOS boundary regressions run with fake OS APIs and do not claim native Mac execution. The pinned CTranslate2 dependency emits the documented setuptools deprecation warning.
 - `setup.ps1` completed in a fresh temporary project and virtual environment, then imported the desktop and native inference dependencies successfully.
 - Official Tiny English, Parakeet TDT 0.6B v2 int8 and whisper.cpp Base models were downloaded and transcribed real English speech with network connections blocked during inference. Parakeet also transcribed speech at the end of a full five-minute input after several minutes of silence; repeated in-memory whisper.cpp requests reused the same native worker.
 - Actual microphone capture, Unicode clipboard and foreground typing (including Vietnamese characters), and refusal after a focus change were exercised on Windows.
@@ -139,7 +159,7 @@ Vietnamese speech-recognition quality, sustained long-session throughput and com
 - `talknj/transcription.py`: offline CPU backend routing, one-model cache and voice activity detection.
 - `talknj/_whispercpp.py`: persistent spawn-safe whisper.cpp worker with checked native status and explicit shutdown.
 - `talknj/_model_formats.py`: native-export integrity validation with bounded stat-fingerprint caching.
-- `talknj/native.py`: Win32 global keyboard hook, clipboard and Unicode insertion.
+- `talknj/native.py` and `talknj/_native_macos.py`: Windows/macOS global keyboard listening, clipboard and focus-checked Unicode insertion.
 - `talknj/settings.py`: atomic per-user preferences.
 
 Inference uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [CTranslate2](https://github.com/OpenNMT/CTranslate2), [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), and [pywhispercpp](https://github.com/absadiki/pywhispercpp). Only the currently selected engine retains speech-model weights. whisper.cpp runs in a separate persistent child process to isolate native initialization/decode failures; audio stays in memory. Failed engines are released without retrying a recording automatically; a new explicit recording can load a fresh engine.
