@@ -23,8 +23,8 @@ def main() -> int:
         bundle = ROOT / "dist" / "TalkNJ.app"
     else:
         raise SystemExit("Build on Windows x64 or macOS arm64/x86_64 using native Python.")
-    if not ((3, 11) <= sys.version_info[:2] < (3, 14) and sys.maxsize > 2**32):
-        raise SystemExit("Building requires Python 3.11–3.13, 64-bit.")
+    if not ((3, 11) <= sys.version_info[:2] and sys.maxsize > 2**32):
+        raise SystemExit("Building requires Python 3.11 or newer, 64-bit.")
 
     importlib.import_module("pywhispercpp.model")  # Initialize native library search paths.
     whispercpp = importlib.import_module("_pywhispercpp")

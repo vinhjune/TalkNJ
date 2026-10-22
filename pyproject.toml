@@ -6,18 +6,18 @@ build-backend = "setuptools.build_meta"
 name = "talknj"
 version = "0.1.0"
 description = "Private, offline Windows and macOS voice dictation with local speech models"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 dependencies = [
-  "PySide6==6.10.2",
+  "PySide6==6.12.0",
   "faster-whisper==1.2.1",
   "sherpa-onnx==1.13.8",
   "sherpa-onnx-core==1.13.8",
   "pywhispercpp==1.5.1",
   "sounddevice==0.5.3",
   "av==16.0.1",
-  "ctranslate2==4.6.0",
+  "ctranslate2==4.8.0",
   "setuptools==80.9.0",
   "pyobjc-core==11.1; sys_platform == 'darwin'",
   "pyobjc-framework-Cocoa==11.1; sys_platform == 'darwin'",

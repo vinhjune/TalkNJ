@@ -11,19 +11,19 @@ if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --dev ]; }; then
 fi
 if [ ! -x .venv/bin/python ]; then
     interpreter=''
-    for candidate in python3.13 python3.12 python3.11; do
-        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; assert (3,11) <= sys.version_info[:2] < (3,14) and sys.maxsize > 2**32'; then
+    for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; assert (3,11) <= sys.version_info[:2] and sys.maxsize > 2**32'; then
             interpreter="$candidate"
             break
         fi
     done
     if [ -z "$interpreter" ]; then
-        echo 'Install native macOS Python 3.11–3.13 (64-bit) before setup.' >&2
+        echo 'Install native macOS Python 3.11 or newer (64-bit) before setup.' >&2
         exit 1
     fi
     "$interpreter" -m venv .venv
 fi
-.venv/bin/python -c 'import sys; assert sys.platform == "darwin" and (3,11) <= sys.version_info[:2] < (3,14) and sys.maxsize > 2**32'
+.venv/bin/python -c 'import sys; assert sys.platform == "darwin" and (3,11) <= sys.version_info[:2] and sys.maxsize > 2**32'
 .venv/bin/python -c 'import platform; assert int(platform.mac_ver()[0].split(".")[0]) >= 14, "TalkNJ requires macOS 14 or newer."'
 python_architecture=$(.venv/bin/python -c 'import platform; print(platform.machine())')
 if [ "$python_architecture" != "$(uname -m)" ]; then

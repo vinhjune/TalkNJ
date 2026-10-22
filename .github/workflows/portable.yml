@@ -7,6 +7,34 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            python: '3.13'
+          - runner: windows-2022
+            python: '3.14'
+          - runner: macos-15
+            python: '3.14'
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+        env:
+          CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_METAL=OFF -DWHISPER_COREML=OFF -DBUILD_SHARED_LIBS=OFF
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Lint
+        run: python -m ruff check talknj tests launch.py build_portable.py smoke_portable.py
+
   build:
     strategy:
       fail-fast: false

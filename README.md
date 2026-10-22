@@ -16,25 +16,25 @@ These details are also available in the app's **About** section.
 
 ### Windows
 
-Install **Python 3.11–3.13 x64** with the Windows Python launcher, then run in PowerShell:
+Install **Python 3.11 or newer, 64-bit** with the Windows Python launcher, then run in PowerShell:
 
 ```powershell
 .\start.ps1
 ```
 
-On first run, `start.ps1` invokes `setup.ps1` to create `.venv` and install dependencies. Later launches do not invoke pip and work offline with an installed model. Run `.\setup.ps1` explicitly after updating source dependencies, or `.\setup.ps1 -Dev` to install development tools. Setup probes Python 3.13, 3.12, then 3.11, rejecting 32-bit interpreters. If PowerShell blocks local scripts, use the commands directly instead of changing machine-wide policy:
+On first run, `start.ps1` invokes `setup.ps1` to create `.venv` and install dependencies. Later launches do not invoke pip and work offline with an installed model. Run `.\setup.ps1` explicitly after updating source dependencies, or `.\setup.ps1 -Dev` to install development tools. Setup uses the default `py -3` interpreter when it is 3.11 or newer, otherwise the newest installed 3.11+ release. It rejects 32-bit interpreters. If PowerShell blocks local scripts, use the commands directly instead of changing machine-wide policy:
 
 ```powershell
-py -3.13 -m venv .venv  # or -3.12 / -3.11, matching your installation
+py -3 -m venv .venv  # or py -3.14 / -3.13 / -3.12 / -3.11, matching your installation
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m talknj
 ```
 
-No CUDA, GPU, separately installed FFmpeg, API key, account or administrator privilege is required. PyAV 16.0.1, CTranslate2 4.6.0 and its compatible setuptools runtime are pinned after Windows import verification; CTranslate2 currently emits a dependency deprecation warning that does not affect inference. If a Windows native dependency fails to load, install the Microsoft Visual C++ 2015–2022 x64 Redistributable from Microsoft.
+No CUDA, GPU, separately installed FFmpeg, API key, account or administrator privilege is required. PySide6 6.12.0, PyAV 16.0.1 and CTranslate2 4.8.0 are pinned; the Python 3.14 and 3.13 wheel sets for these pins were verified on Windows, and CTranslate2 currently emits a dependency deprecation warning that does not affect inference. If a Windows native dependency fails to load, install the Microsoft Visual C++ 2015–2022 x64 Redistributable from Microsoft.
 
 ### macOS
 
-Install native **Python 3.11–3.13, 64-bit**, then run `sh start.sh` in Terminal. Initial setup uses `setup.sh`; run `sh setup.sh --dev` for development/build tools. Later launches do not invoke pip. Direct Python execution remains available with `.venv/bin/python -m talknj` or `.venv/bin/python launch.py`.
+Install native **Python 3.11 or newer, 64-bit**, then run `sh start.sh` in Terminal. Initial setup uses `setup.sh`; run `sh setup.sh --dev` for development/build tools. Later launches do not invoke pip. Direct Python execution remains available with `.venv/bin/python -m talknj` or `.venv/bin/python launch.py`.
 
 The pinned PyAV Apple Silicon wheel requires **macOS 14 or newer**. Intel Macs also need Xcode Command Line Tools (`xcode-select --install`): the pinned whisper.cpp binding has no Intel Mac wheel, so setup builds its CPU extension from source with portable static-library flags. Use native Python for the target architecture, not a mixed Rosetta environment.
 
