@@ -4,6 +4,14 @@ Private voice dictation for Windows 10/11 x64 and macOS 14+ (Apple Silicon or In
 
 This is **speech-to-text**, not text-to-speech. Recognition happens after recording stops; it is not live word-by-word streaming.
 
+## About
+
+- **License:** [GPL-3.0-only](LICENSE)
+- **Creator:** Vinh Hoang
+- **Email:** [hoangthevinh.htv@gmail.com](mailto:hoangthevinh.htv@gmail.com)
+
+These details are also available in the app's **About** section.
+
 ## Run from source
 
 ### Windows
@@ -112,13 +120,15 @@ On macOS, run `sh build.sh`. It creates `dist/TalkNJ.app` and an architecture-sp
 
 Both bundles include their Python/native runtimes and UI assets, **not speech weights**. Models/settings remain in external per-user storage, so portable distribution does not imply self-contained user data. Python launch support is retained.
 
+The full [GPL-3.0 license](LICENSE) is included in portable bundles (`TalkNJ/_internal/LICENSE` in the Windows ZIP).
+
 Application, window and tray icons use the text-free microphone/speech-bubble artwork from `images/design.png`. Qt uses portable PNG assets; native builds embed the Windows ICO or macOS ICNS.
 
 Setup/build imports the whisper.cpp native extension before proceeding; macOS also reports its Mach-O architecture with `file`. Setup rejects a Python interpreter whose architecture differs from the launching shell.
 
 After a native build, run `python smoke_portable.py` with the build environment's Python. It starts the **frozen executable**, loads all three speech runtimes and the native integration, and renders the Qt window and application icon without downloading weights, recording audio or requesting permissions. Each run writes a fresh receipt and screenshots under `dist/smoke/`; missing receipts, unreadable icons or runtime errors fail the check. The native workflow runs this check on every matrix target before uploading its archive. It is not a microphone, hotkey-permission or real-model inference test.
 
-Windows executables are unsigned and may trigger SmartScreen. macOS builds are ad-hoc signed, not Developer ID-signed or notarized; Gatekeeper can block them. For a trusted local build, use the macOS Privacy & Security **Open Anyway** flow rather than disabling Gatekeeper system-wide. Public distribution requires an appropriate signing/notarization process. No installer or project distribution license is included; review bundled dependency/model terms before redistribution.
+Windows executables are unsigned and may trigger SmartScreen. macOS builds are ad-hoc signed, not Developer ID-signed or notarized; Gatekeeper can block them. For a trusted local build, use the macOS Privacy & Security **Open Anyway** flow rather than disabling Gatekeeper system-wide. Public distribution requires an appropriate signing/notarization process. No installer is included; review bundled dependency/model terms before redistribution.
 
 ## Development checks
 

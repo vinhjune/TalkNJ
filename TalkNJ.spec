@@ -36,6 +36,7 @@ a = Analysis(
     datas=(collect_data_files('faster_whisper') + collect_data_files('sherpa_onnx')
            + collect_data_files('pywhispercpp') + copy_metadata('pywhispercpp')
            + copy_metadata('sherpa-onnx') + copy_metadata('sherpa-onnx-core')
+           + [('LICENSE', '.')]
            + collect_data_files('talknj', includes=[
                'assets/*.svg', 'assets/*.png', 'assets/*.ico', 'assets/*.icns'])),
     hiddenimports=['_pywhispercpp', 'sherpa_onnx.lib._sherpa_onnx', 'talknj._whispercpp']

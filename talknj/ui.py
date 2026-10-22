@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
         side.addSpacing(35)
         self.pages = QStackedWidget()
         self.nav = []
-        for index, title in enumerate(("Dictation", "Model library", "Preferences")):
+        for index, title in enumerate(("Dictation", "Model library", "Preferences", "About")):
             button = QPushButton(title)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -323,6 +323,7 @@ class MainWindow(QMainWindow):
         self._dictation_page()
         self._models_page()
         self._preferences_page()
+        self._about_page()
         self.navigate(0)
 
     def navigate(self, index: int) -> None:
@@ -506,6 +507,19 @@ class MainWindow(QMainWindow):
         frame, box = card()
         box.addWidget(label("Background use & privacy", "section"))
         box.addWidget(label("Closing this window keeps TalkNJ running in the background so your shortcut still works. Use the tray or menu-bar icon to quit. Recording stops automatically at five minutes. Typing never activates another window; if focus changes, recover your text from the clipboard.", "muted", True))
+        layout.addWidget(frame)
+        layout.addStretch()
+
+    def _about_page(self) -> None:
+        layout = self._page("About TalkNJ", "Private, offline voice dictation.")
+        frame, box = card()
+        box.addWidget(label("TalkNJ", "section"))
+        box.addWidget(label("Creator: Vinh Hoang"))
+        contact = label("Email: hoangthevinh.htv@gmail.com")
+        contact.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.addWidget(contact)
+        box.addWidget(label("License: GNU General Public License v3.0 (GPL-3.0)",
+                            "muted", True))
         layout.addWidget(frame)
         layout.addStretch()
 
