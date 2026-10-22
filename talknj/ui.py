@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QStackedWidget, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
+from talknj import __version__
 from talknj.audio import MAX_SECONDS
 from talknj.models import CATALOG
 from talknj.native import _KEY_VKS, format_hotkey, validate_hotkey
@@ -537,6 +538,7 @@ class MainWindow(QMainWindow):
         layout = self._page("About TalkNJ", "Private, offline voice dictation.")
         frame, box = card()
         box.addWidget(label("TalkNJ", "section"))
+        box.addWidget(label(f"Version {__version__}", "muted"))
         box.addWidget(label("Creator: Vinh Hoang"))
         contact = label("Email: hoangthevinh.htv@gmail.com")
         contact.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
