@@ -50,6 +50,8 @@ The recording button is a preview workflow: it records into TalkNJ and copies th
 
 Closing the window keeps the app in the system tray/menu bar and leaves the global hotkey active. Use the tray/menu-bar **Quit TalkNJ** or **Ctrl+Q** (**Cmd+Q** on macOS) to exit; the keyboard quit shortcut is disabled when assigned to dictation. There is no App menu. Only one instance runs per user.
 
+The tray/menu-bar menu shows the current dictation shortcut as a read-only label and includes a **Push to talk** toggle that switches between hold and press-to-start/stop modes.
+
 ## Models and languages
 
 | Model family | Approximate download | Languages in TalkNJ | Tradeoff |

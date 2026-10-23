@@ -493,6 +493,37 @@ def test_mode_change_is_persisted_with_shortcut(controller):
     assert saved.hotkey == controller.listener.chord
 
 
+def test_tray_hotkey_label_reflects_shortcut_and_mode(controller):
+    shortcut = desktop.format_hotkey(controller.listener.chord)
+    controller.window.push_to_talk.setChecked(True)
+    assert shortcut in controller.hotkey_action.text()
+    assert "hold" in controller.hotkey_action.text()
+    controller.window.push_to_talk.setChecked(False)
+    assert "press" in controller.hotkey_action.text()
+    assert not controller.push_to_talk_action.isChecked()
+
+
+def test_tray_push_to_talk_toggles_and_persists(controller):
+    controller.window.push_to_talk.setChecked(False)
+    assert not controller.push_to_talk_action.isChecked()
+    controller.push_to_talk_action.trigger()
+    assert controller.window.push_to_talk.isChecked()
+    saved, warning = load_settings()
+    assert not warning
+    assert saved.hotkey_mode == "hold"
+    controller.push_to_talk_action.trigger()
+    assert not controller.window.push_to_talk.isChecked()
+    saved, warning = load_settings()
+    assert saved.hotkey_mode == "toggle"
+
+
+def test_tray_push_to_talk_is_disabled_while_busy(controller):
+    controller.update_state("recording")
+    assert not controller.push_to_talk_action.isEnabled()
+    controller.update_state("idle")
+    assert controller.push_to_talk_action.isEnabled()
+
+
 def test_shutdown_closes_backend_only_after_jobs_drain(controller):
     first, second = object(), object()
     controller.jobs.update((first, second))

@@ -107,6 +107,12 @@ class Controller(QObject):
         show = menu.addAction("Open TalkNJ")
         show.triggered.connect(self.show_window)
         menu.addSeparator()
+        self.hotkey_action = menu.addAction("")
+        self.hotkey_action.setEnabled(False)
+        self.push_to_talk_action = menu.addAction("Push to talk")
+        self.push_to_talk_action.setCheckable(True)
+        self.push_to_talk_action.triggered.connect(self.tray_push_to_talk)
+        menu.addSeparator()
         quit_action = menu.addAction("Quit TalkNJ")
         quit_action.triggered.connect(self.request_quit)
         self.tray.setContextMenu(menu)
@@ -252,13 +258,16 @@ class Controller(QObject):
         self.persist()
 
     def update_hints(self):
-        gesture = "Hold" if self.settings.hotkey_mode == "hold" else "Press"
+        holding = self.settings.hotkey_mode == "hold"
+        gesture = "Hold" if holding else "Press"
         try:
             shortcut = format_hotkey(self.settings.hotkey)
         except (TypeError, ValueError):
             shortcut = "a configured shortcut"
         self.window.capture_hint.setText(
             f"{gesture} {shortcut} anywhere, or use the recording button. Five-minute limit.")
+        self.hotkey_action.setText(f"Hotkey: {shortcut} ({'hold' if holding else 'press'})")
+        self.push_to_talk_action.setChecked(holding)
 
     def register_hotkey(self, chord):
         listener = None
@@ -366,6 +375,7 @@ class Controller(QObject):
         self.state = state
         self.window.set_busy(state, self.active_model() is not None)
         self.tray.setToolTip(f"TalkNJ · {state.capitalize()} · {self.window.hotkey.text()}")
+        self.push_to_talk_action.setEnabled(state == "idle")
         if state == "recording":
             self.update_countdown()
         if state == "idle":
@@ -564,6 +574,10 @@ class Controller(QObject):
     def tray_activated(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.DoubleClick, QSystemTrayIcon.ActivationReason.Trigger):
             self.show_window()
+
+    @Slot(bool)
+    def tray_push_to_talk(self, checked):
+        self.window.push_to_talk.setChecked(checked)
 
     @Slot()
     def hide_window(self):
