@@ -8,3 +8,5 @@ build/
 dist/
 *.spec.bak
 .smoke/
+*.pfx
+*.p12

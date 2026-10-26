@@ -1,7 +1,8 @@
 # Build natively on Windows or macOS with: python build_portable.py
 import sys
+import subprocess
 from importlib.metadata import distribution
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
@@ -56,6 +57,12 @@ exe = EXE(
     entitlements_file='packaging/macos-entitlements.plist' if macos else None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='TalkNJ')
+if not macos:
+    subprocess.run([
+        'powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', str(Path(SPECPATH) / 'packaging' / 'sign-windows.ps1'),
+        '-FilePath', str(Path(coll.name) / 'TalkNJ.exe'),
+    ], check=True)
 if macos:
     app = BUNDLE(
         coll, name='TalkNJ.app', bundle_identifier='app.talknj.desktop', version='0.1.0',
